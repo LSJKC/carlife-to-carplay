@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Solid backing plate for the adaptive icon.
+
+    This used to be two <aapt:attr> inline gradients. Those compile without
+    complaint, but an OEM launcher whose icon renderer does not evaluate the
+    inline aapt block is left with a fill it cannot resolve and falls back to
+    the stock Android icon — which is exactly "there is no icon on the home
+    screen, just an Android head". A flat fill needs no such evaluation and
+    renders on every launcher, so the plate is a solid colour with a lighter
+    corner wedge drawn as an ordinary path.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M0,0h108v108h-108z"
+        android:fillColor="#0B1220" />
+    <path
+        android:pathData="M108,0 L108,52 L56,0 z"
+        android:fillColor="#16294A" />
+</vector>

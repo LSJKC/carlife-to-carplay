@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="space_xs">4dp</dimen>
+    <dimen name="space_s">8dp</dimen>
+    <dimen name="space_m">12dp</dimen>
+    <dimen name="space_l">16dp</dimen>
+    <dimen name="space_xl">20dp</dimen>
+    <dimen name="space_xxl">28dp</dimen>
+
+    <dimen name="radius_card">20dp</dimen>
+    <dimen name="radius_sheet">24dp</dimen>
+    <dimen name="radius_field">14dp</dimen>
+    <dimen name="card_stroke">1dp</dimen>
+
+    <dimen name="screen_padding">20dp</dimen>
+    <dimen name="ring_size">240dp</dimen>
+    <dimen name="ring_stroke">10dp</dimen>
+    <dimen name="device_pill_height">46dp</dimen>
+    <dimen name="button_height">56dp</dimen>
+    <dimen name="metric_card_height">76dp</dimen>
+    <dimen name="log_max_height">150dp</dimen>
+    <dimen name="touch_target">48dp</dimen>
+</resources>

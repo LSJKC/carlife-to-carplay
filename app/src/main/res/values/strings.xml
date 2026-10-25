@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarLink 投屏</string>
+    <string name="app_subtitle">无线投屏 · 手机画面到车机</string>
+
+    <string name="status_idle_detail">在车机上选择本机，然后开始投屏</string>
+    <string name="action_start">开始投屏</string>
+    <string name="action_stop">停止投屏</string>
+
+    <string name="device_title">车机</string>
+    <string name="device_hint">尚未配对车机，请先在系统蓝牙设置中完成配对</string>
+    <string name="device_none">尚未配对车机</string>
+    <string name="device_unnamed">未命名车机</string>
+    <string name="device_pick_title">选择车机</string>
+    <string name="device_refresh">刷新车机列表</string>
+
+    <string name="stages_title">连接过程</string>
+    <string name="stage_not_started">未开始</string>
+    <string name="stage_ended">已结束</string>
+    <string name="stage_interrupted">已中断</string>
+    <string name="stage_step">%1$d / %2$d</string>
+
+    <string name="metrics_fps">帧率</string>
+    <string name="metrics_bitrate">码率</string>
+    <string name="metrics_resolution">分辨率</string>
+    <string name="metrics_duration">时长</string>
+    <string name="unit_fps">帧/秒</string>
+    <string name="unit_mbps">兆比特/秒</string>
+    <string name="unit_kbps">千比特/秒</string>
+
+    <string name="logs_title">运行日志</string>
+    <string name="logs_empty">暂无日志</string>
+    <string name="logs_expand">展开</string>
+    <string name="logs_collapse">收起</string>
+
+    <string name="source_title">画面来源</string>
+    <string name="source_short_auto">自动</string>
+    <string name="source_short_carlife">CarLife</string>
+    <string name="source_short_mirror">镜像</string>
+    <string name="source_auto_detail">装了 CarLife 就用 CarLife，没装才用屏幕镜像。推荐这一项。</string>
+    <string name="source_carlife_detail">用手机上的 CarLife 显示车机界面，画面清晰，不用授权录屏。</string>
+    <string name="source_mirror_detail">把手机屏幕整个投上去。每次连接都要授权一次录屏。</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_audio">发送媒体音频</string>
+    <string name="settings_audio_detail">捕获手机正在播放的媒体声音并发送到车机</string>
+    <string name="settings_touch">触控回传</string>
+    <string name="settings_touch_detail">允许车机触控操作手机，需要在系统设置中启用无障碍服务</string>
+    <string name="settings_touch_enabled">已开启</string>
+    <string name="settings_media_access">媒体信息读取权限</string>
+    <string name="settings_media_access_detail">允许读取当前播放的歌名、歌手和封面；需在系统页面手动开启</string>
+    <string name="settings_media_access_enabled">已开启</string>
+    <string name="settings_auto_connect">镜像模式蓝牙自动投屏</string>
+    <string name="settings_auto_connect_detail">只控制屏幕镜像模式；不会控制 CarLife 的自动启动和断开</string>
+    <string name="settings_carlife_auto_session">CarLife 自动跟车</string>
+    <string name="settings_carlife_auto_session_detail">车机蓝牙连接后自动启动 CarLife，蓝牙断开且未完成 Wi‑Fi 交接时自动释放</string>
+    <string name="settings_connect_guide">打开荣耀车联连接页</string>
+    <string name="settings_connect_guide_detail">打开的同时会在后台开始投屏，你在这页点「开始连接」即可；离开这页不会取消</string>
+    <string name="settings_wallpaper">全屏合成壁纸</string>
+    <string name="settings_wallpaper_detail">%1$s · 1972×520 全画布</string>
+    <string name="wallpaper_custom">已使用自定义图片</string>
+    <string name="wallpaper_default">默认透明画布</string>
+    <string name="wallpaper_preview">全屏壁纸预览</string>
+    <string name="wallpaper_alpha_note">CarPlay 画面使用单路 H.264；透明区域会在编码时显示为黑色。</string>
+    <string name="wallpaper_crop_title">调整壁纸取景</string>
+    <string name="wallpaper_crop_ratio">裁剪比例 1972:520 · 拖动或双指缩放</string>
+    <string name="wallpaper_crop_preview">壁纸裁剪区域，比例 1972 比 520</string>
+    <string name="wallpaper_crop_apply">应用裁剪</string>
+    <string name="wallpaper_crop_reselect">重新选择</string>
+    <string name="wallpaper_choose">选择壁纸</string>
+    <string name="wallpaper_reset">恢复默认</string>
+    <string name="settings_frame_rate">帧率</string>
+    <string name="settings_frame_rate_detail">当前 %1$d fps · 车机声明上限 30</string>
+    <string name="settings_safe_area">主屏安全区方案</string>
+    <string name="settings_safe_area_detail">按车保存 · 完整 CarLife 帧保留侧栏；仅安全尺寸源放入安全区</string>
+    <string name="safe_area_title">主屏安全区方案</string>
+    <string name="safe_area_enabled">启用安全区适配</string>
+    <string name="safe_area_strict">严格使用车机 Safe Area</string>
+    <string name="safe_area_relaxed">舒适模式 · 使用安全边距的 50%</string>
+    <string name="safe_area_custom">手动设置四边边距</string>
+    <string name="safe_area_off">不使用安全区 · 原始全屏</string>
+    <string name="safe_area_margin_note">手动边距按车机主屏原始像素填写；至少保留 320×160。修改后下次连接生效。</string>
+    <string name="safe_area_selected">当前方案</string>
+    <string name="frame_rate_auto">跟随车机（推荐）</string>
+    <string name="frame_rate_30">30 fps</string>
+    <string name="frame_rate_60">60 fps（超出车机声明，实验）</string>
+    <string name="frame_rate_selected">当前选择</string>
+    <string name="frame_rate_note">车机在 /info 里声明 maxFPS=30，真 iPhone 拿到的也是 30。选 60 只是试一试它会不会接受；日志里会打印车机实际回包的帧率，被拒绝时会看到仍是 30。</string>
+    <string name="toast_connect_guide_failed">未能打开荣耀车联，请在系统设置里手动进入</string>
+
+    <string name="settings_bluetooth">本机蓝牙地址</string>
+    <string name="settings_bluetooth_detail">无线声明需要手机真实的蓝牙地址，通常无需手动填写</string>
+    <string name="settings_bluetooth_current">当前 %1$s</string>
+    <string name="settings_advanced">高级</string>
+    <string name="settings_clear_pair">清除车机配对记录</string>
+    <string name="settings_clear_pair_detail">下次连接会重新执行配对验证</string>
+    <string name="settings_export">导出诊断日志</string>
+    <string name="settings_export_detail">选择会话和保存位置，不会上传</string>
+    <string name="export_session_title">选择要导出的会话</string>
+    <string name="settings_version">版本 %1$s</string>
+
+    <string name="protocol_title">帮助</string>
+    <string name="protocol_subtitle">怎么连、出问题怎么办</string>
+
+    <string name="dialog_bt_title">本机蓝牙地址</string>
+    <string name="dialog_bt_hint">AA:BB:CC:DD:EE:FF</string>
+    <string name="dialog_bt_help">在系统设置 → 关于手机 → 状态信息中查看；留空则恢复自动读取。</string>
+    <string name="dialog_bt_invalid">地址格式不正确，应形如 AA:BB:CC:DD:EE:FF</string>
+    <string name="dialog_save">保存</string>
+    <string name="dialog_cancel">取消</string>
+    <string name="dialog_clear">恢复自动读取</string>
+
+    <string name="toast_no_peer">请先选择已配对的车机</string>
+    <string name="toast_no_bt">请打开蓝牙并授予附近设备权限</string>
+    <string name="toast_pair_first">请先在系统蓝牙设置中与车机完成配对</string>
+    <string name="toast_first_time_guide">这台车还是第一次连，先到荣耀车联里点「开始连接」完成授权；成功一次之后就能直连了</string>
+    <string name="toast_export_empty">暂无可导出的会话日志</string>
+    <string name="toast_exported_to">已导出到 %1$s</string>
+    <string name="toast_export_saved">日志已保存到你选择的位置</string>
+    <string name="toast_export_failed">保存日志失败：%1$s</string>
+    <string name="toast_bt_saved">已保存蓝牙地址</string>
+    <string name="toast_bt_cleared">已恢复自动读取</string>
+    <string name="toast_pair_cleared">已清除该车机的配对记录</string>
+    <string name="toast_refreshed">已刷新车机列表</string>
+    <string name="toast_capture_canceled">已取消屏幕投射授权</string>
+    <string name="toast_wallpaper_saved">全屏壁纸已更新</string>
+    <string name="toast_wallpaper_reset">已恢复默认壁纸</string>
+    <string name="toast_wallpaper_failed">图片读取失败，请选择其他图片</string>
+    <string name="toast_wallpaper_picker_failed">无法打开图片选择器</string>
+    <string name="toast_carlife_missing">未找到手机自带的 CarLife 应用</string>
+    <string name="toast_accessibility_failed">无法打开无障碍设置</string>
+    <string name="toast_media_access_failed">无法打开通知使用权设置，请在系统设置中手动开启</string>
+    <string name="toast_source_next">画面来源将在下次连接时生效</string>
+
+    <string name="notif_channel">投屏连接</string>
+    <string name="notif_title">CarLink 投屏</string>
+    <string name="notif_text">正在与车机保持连接</string>
+    <string name="notif_stop">停止</string>
+
+    <string name="touch_service_desc">在您主动投屏时，把车机的触控和返回、主页操作传到手机。可以随时在系统设置中关闭。</string>
+</resources>

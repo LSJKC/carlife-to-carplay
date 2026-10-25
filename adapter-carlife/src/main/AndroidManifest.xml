@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- CarLife is launched by component name and binds this host, so it has to
+         be visible despite package visibility filtering. -->
+    <queries>
+        <package android:name="com.baidu.carlife.honor" />
+    </queries>
+
+    <application>
+        <!-- CarLife binds here after it is told to connect. It must be reachable
+             from CarLife's process, so it is exported. -->
+        <service
+            android:name="com.carplay.adapter.carlife.CarLifeHostService"
+            android:exported="true" />
+    </application>
+
+</manifest>

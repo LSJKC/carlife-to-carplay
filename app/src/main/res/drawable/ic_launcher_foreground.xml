@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Artwork is centred on (54,54) so it stays inside the adaptive-icon
+         safe zone (66dp circle) and is not clipped by circular masks. -->
+    <group
+        android:translateX="-5"
+        android:translateY="4"
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.94"
+        android:scaleY="0.94">
+        <path
+            android:pathData="M36,28 L74,28 A8,8 0 0 1 82,36 L82,64 A8,8 0 0 1 74,72 L56,72"
+            android:strokeColor="#EAF1FF"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M36,72 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0"
+            android:fillColor="#2EE6D6" />
+        <path
+            android:pathData="M36,62 A10,10 0 0 1 46,72"
+            android:strokeColor="#2EE6D6"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M36,55 A17,17 0 0 1 53,72"
+            android:strokeColor="#4C8DFF"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M36,48 A24,24 0 0 1 60,72"
+            android:strokeColor="#4C8DFF"
+            android:strokeAlpha="0.75"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>
