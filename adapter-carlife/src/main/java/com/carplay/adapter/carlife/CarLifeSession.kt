@@ -78,12 +78,25 @@ internal class CarLifeSession(
     private val onTtsInit: (sampleRate: Int, channels: Int, format: Int) -> Unit = { _, _, _ -> },
     private val onTtsData: (ByteArray) -> Unit = {},
     private val onFailure: (Throwable) -> Unit = {},
+    /**
+     * Reference back to the adapter for accessing safeAreaPolicy.
+     * This allows CarLifeSession to determine encoder source dimensions.
+     *
+     * IMPORTANT: We capture the policy value at construction time to avoid
+     * concurrent modification issues. The policy should not change after
+     * the session starts, so this snapshot is stable and safe to use.
+     */
+    private val container: CarLifeProjectionAdapter? = null,
 ) : AutoCloseable {
 
     private val running = AtomicBoolean(false)
     private val retired = AtomicBoolean(false)
     private val lifecycleLock = Any()
     private val failureReported = AtomicBoolean(false)
+
+    // Snapshot of safeAreaPolicy captured at construction time to avoid
+    // concurrent modification issues while the session runs
+    private val snapshotedSafeAreaPolicy = container?.safeAreaPolicy
     private var cmdSocket: Socket? = null
     private var cmdOut: BufferedOutputStream? = null
     private var touchSocket: Socket? = null
@@ -558,23 +571,48 @@ internal class CarLifeSession(
     /**
      * Builds VIDEO_ENCODER_INIT for the CarLife source surface.
      *
-     * Unlike Buick-E5's self-drawn virtual displays, CarLife's prepareCast
-     * surface and H.264 source are not a safe-area viewport that the host can
-     * resize freely. Keep the source at the physical panel dimensions and
-     * carry the card rectangle as metadata. The AirPlay-side compositor owns
-     * the optional wallpaper viewport; CarLife's touch space remains tied to
-     * the source dimensions it reports.
+     * The encoder source size is determined by the safe-area policy:
+     * - If safe area is enabled, encode at safe-area dimensions
+     * - Otherwise, encode at full panel dimensions
+     *
+     * The safe-area metadata is always transmitted via areaWidth/areaHeight/areaX/areaY.
      */
     private fun encoderInitPayload(): ByteArray {
         val area = panel ?: return CarLifeProto.videoEncoderInfo(width, height, fps)
+
+        // Determine source encoding dimensions based on safe-area policy
+        // We use the snapshotted policy from construction time to avoid concurrent
+        // modification issues. The policy is stored as Any? to avoid cross-module dependency.
+        // We check if it has an 'enabled' property via reflection.
+        var useSafeAreaSource = false
+        val policy = snapshotedSafeAreaPolicy
+        if (policy != null) {
+            try {
+                val enabledField = policy.javaClass.getField("enabled")
+                val modeField = policy.javaClass.getField("mode")
+                val enabled = enabledField.get(policy) as? Boolean ?: false
+                val mode = modeField.get(policy)?.toString() ?: "OFF"
+                useSafeAreaSource = enabled && mode != "OFF"
+                log("安全区策略已应用：enabled=$enabled, mode=$mode, useSafeAreaSource=$useSafeAreaSource")
+            } catch (e: Exception) {
+                // Policy doesn't have the expected structure, use safe area
+                log("解析 safeAreaPolicy 失败：${e.message}，回退到全屏编码")
+            }
+        } else {
+            log("safeAreaPolicy 未设置，使用全屏编码")
+        }
+
+        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
+        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
+
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
-                "CarLife 源保持 ${area.panelWidth}x${area.panelHeight}，" +
-                "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})，" +
-                "CarLife UI 越出安全区=${area.drawUiOutsideSafeArea}，自适应=${area.needAdapterScreen}",
+                "CarLife 源=${sourceWidth}x$sourceHeight " +
+                "(${if (useSafeAreaSource) "安全区" else "全屏"})，" +
+                "元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})",
         )
         return CarLifeProto.videoEncoderInfo(
-            area.panelWidth, area.panelHeight, fps,
+            sourceWidth, sourceHeight, fps,
             areaWidth = area.safeWidth,
             areaHeight = area.safeHeight,
             areaX = area.safeX,

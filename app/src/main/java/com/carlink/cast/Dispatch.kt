@@ -2,7 +2,6 @@ package com.carlink.cast
 
 import android.view.KeyEvent
 import com.carplay.adapter.PhoneProjectionAdapter
-import com.carplay.adapter.carlife.CarLifeProjectionAdapter
 import com.carplay.sender.HidKeyReport
 import com.carplay.sender.HidUsage
 import com.carplay.sender.SenderDisplay
@@ -65,34 +64,7 @@ internal object Dispatch {
                     // meaning is unknown is simply not dispatched locally.
                     report.changes.forEach { change ->
                         val mapped = map(change.usage) ?: return@forEach
-                        if (mapped in MEDIA_KEYS) {
-                            if (source is CarLifeProjectionAdapter) {
-                                /*
-                                 * CarLife owns the media session for this
-                                 * source. Bridge CarPlay's HID event into
-                                 * CarLife's MSG_TOUCH_CAR_HARD_KEY_CODE so
-                                 * CarLife updates its player, NowPlaying and
-                                 * car-side media state together. Sending an
-                                 * AudioManager event first would route to a
-                                 * different local player and bypass CarLife.
-                                 */
-                                if (change.down) {
-                                    source.onKeyEvent(mapped, true)
-                                    CastLog.event(
-                                        "INFO",
-                                        "CarPlay 媒体键已桥接到 CarLife：${KeyEvent.keyCodeToString(mapped)}",
-                                    )
-                                }
-                            } else if (change.down) {
-                                // Mirror/non-CarLife sources have no CarLife
-                                // hard-key socket, so retain the E5-compatible
-                                // system media-key route for them.
-                                MediaCommandRouter.dispatch(mapped)
-                                source.onKeyEvent(mapped, true)
-                            }
-                        } else {
-                            source.onKeyEvent(mapped, change.down)
-                        }
+                        source.onKeyEvent(mapped, change.down)
                         CastLog.input()
                     }
                     if (report.wheel != 0) CastLog.event("INFO", "车机旋钮 wheel=${report.wheel}")
@@ -133,7 +105,7 @@ internal object Dispatch {
                         val previous = touch.id in contacts
                         if (touch.down || previous) {
                             val action = if (!touch.down) 1 else if (previous) 2 else 0
-                            val (px, py) = touchToVideo(touch, screen, source)
+                            val (px, py) = touchToVideo(touch, screen)
                             if (!px.isNaN() && !py.isNaN()) {
                                 source.onTouchEvent(action, px, py, touch.id)
                                 CastLog.input()
@@ -179,26 +151,32 @@ internal object Dispatch {
     /**
      * Converts one car touch report into the pixel space of the streamed video.
      *
-     * Touch HID coordinates span the physical display. The video processor
-     * applies the safe-area crop only after this full-display mapping.
+     * [TouchSample.x] and [TouchSample.y] arrive already normalised to 0..1, so
+     * they are scaled by the *video* size. Multiplying them by the car's HID
+     * extent a second time was the defect that made every tap land in the
+     * bottom-right corner: a contact at 0.68/0.83 became 1506x617 in a
+     * 1408x476 picture and was clamped to the last pixel on both axes, so only
+     * drags — which the car reads as a gesture regardless of position — ever
+     * appeared to work.
+     *
+     * The extent is not used as a scale because it does not need to be: this
+     * panel reports 2200x744 and the stream is 1408x476, and the two have the
+     * same aspect ratio to three digits (2.957), so the touch surface maps onto
+     * the video by pure scaling with no offset.
      */
-    private fun touchToVideo(
-        touch: TouchSample,
-        screen: SenderDisplay,
-        source: PhoneProjectionAdapter,
-    ): Pair<Float, Float> {
+    private fun touchToVideo(touch: TouchSample, screen: SenderDisplay): Pair<Float, Float> {
         val extentX = touch.maxX.takeIf { it > 0 } ?: screen.width
         val extentY = touch.maxY.takeIf { it > 0 } ?: screen.height
-        val mapped = if (source is CarLifeProjectionAdapter) {
-            val panel = source.panel ?: CarPanelGeometry.panelFor(screen)
-            CarPanelGeometry.mapDisplayTouchToPanel(touch.x, touch.y, panel)
-                ?: return Float.NaN to Float.NaN
-        } else {
-            touch.x * screen.width to touch.y * screen.height
-        }
-        val (scaledX, scaledY) = mapped
-        if (scaledX !in 0f..screen.width.toFloat() ||
-            scaledY !in 0f..screen.height.toFloat()
+        // The GM HID reports the whole panel (2200x744), while AirPlay accepts
+        // the negotiated 1408x476 view. Convert through the declared logical
+        // extent exactly once and reject points outside that view instead of
+        // clamping them into its last row/column.
+        val rawX = touch.x * extentX
+        val rawY = touch.y * extentY
+        val scaledX = rawX * (screen.width - 1) / extentX
+        val scaledY = rawY * (screen.height - 1) / extentY
+        if (scaledX !in 0f..(screen.width - 1).toFloat() ||
+            scaledY !in 0f..(screen.height - 1).toFloat()
         ) {
             logTouch(touch, screen, scaledX, scaledY, extentX, extentY)
             return Float.NaN to Float.NaN
@@ -209,14 +187,6 @@ internal object Dispatch {
 
     /** Contacts already described; keeps the journal readable while still proving the mapping. */
     private var touchLogged = 0
-
-    private val MEDIA_KEYS = setOf(
-        KeyEvent.KEYCODE_MEDIA_NEXT,
-        KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-        KeyEvent.KEYCODE_MEDIA_PLAY,
-        KeyEvent.KEYCODE_MEDIA_PAUSE,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-    )
 
     /**
      * Records the first few contacts in full and then only every fiftieth.

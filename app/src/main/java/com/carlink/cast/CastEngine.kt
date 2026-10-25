@@ -78,7 +78,6 @@ internal class CastEngine(
                 // persistent AirPlay UUID is not a substitute.
                 transportIdentifier = address,
                 trust = { authenticated -> trustFor(peer, authenticated) },
-                hid = hid,
                 log = { message -> log(message) },
             )
             bluetooth = link
@@ -93,21 +92,15 @@ internal class CastEngine(
             check(!closed.get()) { "连接已停止" }
 
             CastLog.stage(CastStage.DISCOVER, "确认车机 AirPlay 端点")
-            val audioEnabled = settings.audio && source.capabilities.audio
-            CastLog.event(
-                "INFO",
-                "媒体音频：${if (audioEnabled) "启用" else "关闭"}，来源=${source.name}，" +
-                    "来源支持=${source.capabilities.audio}",
-            )
             val channel = AirPlayLink(
                 context = context,
                 identity = identity,
                 vehicle = network,
                 source = source,
                 settings = settings,
-                // CarLife has a source-native AAC path; settings.audio defaults
-                // on for that mode unless the user explicitly disabled it.
-                enableAudio = audioEnabled,
+                // A source that cannot produce audio must not negotiate an
+                // audio stream the car will wait on.
+                enableAudio = settings.audio && source.capabilities.audio,
                 endpoint = result.endpoint,
                 peerAddress = peer,
                 trustFor = { authenticated -> trustFor(peer, authenticated) },
@@ -115,9 +108,6 @@ internal class CastEngine(
                 bluetoothAlive = { link.isAlive() },
                 bluetoothIdentity = { link.identityFingerprint() },
                 log = { message -> log(message) },
-                terminalFailure = { failure ->
-                    if (!closed.get()) onFailure(failure)
-                },
             )
             airplay = channel
             channel.start(
@@ -132,18 +122,6 @@ internal class CastEngine(
 
     /** True once the session has ended for any reason. */
     fun hasFinished(): Boolean = finished.get()
-
-    /** True while the network and AirPlay worker are still serving frames. */
-    fun isHealthy(): Boolean =
-        !closed.get() &&
-            !finished.get() &&
-            vehicle?.isAlive() == true &&
-            airplay?.isHealthy() == true
-
-    fun isWirelessHandoffComplete(): Boolean =
-        airplay?.isWirelessHandoffComplete() == true
-
-    fun isBluetoothAlive(): Boolean = bluetooth?.isAlive() == true
 
     /** True when the bytes are an X.509 SubjectPublicKeyInfo for EC or RSA. */
     private fun isPublicKeyEncoding(key: ByteArray): Boolean {

@@ -59,10 +59,10 @@ data class CarLifePanel(
     }
 
     /**
-     * Maps physical-panel coordinates into the zero-origin CarLife safe source.
+     * Maps a point inside the safe rectangle into CarLife's video.
      *
-     * Binder touch callbacks can still be reported in outer virtual-display
-     * coordinates even though the encoder now contains only the safe rectangle.
+     * Used when the video source itself is the safe rectangle: the point is
+     * shifted by the safe origin, scaled to the safe size, and clamped.
      */
     fun mapSafeTouchToSource(
         panelX: Float,
@@ -71,23 +71,19 @@ data class CarLifePanel(
         sourceHeight: Int = safeHeight,
     ): Pair<Float, Float>? {
         if (sourceWidth <= 0 || sourceHeight <= 0) return null
-        if (panelX < safeX || panelX >= safeX + safeWidth ||
-            panelY < safeY || panelY >= safeY + safeHeight
-        ) return null
-        return (
-            (panelX - safeX) * sourceWidth / safeWidth
-            ).coerceIn(0f, (sourceWidth - 1).toFloat()) to
-            (
-                (panelY - safeY) * sourceHeight / safeHeight
-                ).coerceIn(0f, (sourceHeight - 1).toFloat())
+        if (panelX < safeX || panelX >= safeX + safeWidth) return null
+        if (panelY < safeY || panelY >= safeY + safeHeight) return null
+        return ((panelX - safeX) * sourceWidth / safeWidth).coerceIn(0f, sourceWidth - 1f) to
+            ((panelY - safeY) * sourceHeight / safeHeight).coerceIn(0f, sourceHeight - 1f)
     }
 
     /**
-     * CarLife's Binder callback uses the size from prepareCast, which is
-     * either the safe virtual display or the physical full panel depending on
-     * the vendor build. Do not assume it is always the outer panel: scaling a
-     * safe-sized callback into 1972x520 shifts the right half outside the
-     * 1408x476 content rectangle.
+     * Maps a point in a virtual display (AirPlay's canvas) onto this panel.
+     *
+     * The virtual display is whichever of the two shapes it matches better:
+     * a display shaped like the safe view is laid inside the safe rectangle
+     * (overlaid on a separately composited wallpaper), anything else covers
+     * the full panel.
      */
     fun mapVirtualTouchToPanel(
         x: Float,
@@ -95,32 +91,31 @@ data class CarLifePanel(
         virtualWidth: Int,
         virtualHeight: Int,
     ): Pair<Float, Float>? {
-        if (virtualWidth <= 0 || virtualHeight <= 0 ||
-            x < 0f || y < 0f || x >= virtualWidth || y >= virtualHeight
-        ) return null
-        val virtualAspect = virtualWidth.toFloat() / virtualHeight
-        val safeAspect = safeWidth.toFloat() / safeHeight
-        val fullAspect = panelWidth.toFloat() / panelHeight
-        return if (kotlin.math.abs(virtualAspect - safeAspect) <
-            kotlin.math.abs(virtualAspect - fullAspect)
-        ) {
-            safeX + x * safeWidth / virtualWidth to
-                safeY + y * safeHeight / virtualHeight
+        if (virtualWidth <= 0 || virtualHeight <= 0) return null
+        if (x < 0f || y < 0f || x >= virtualWidth || y >= virtualHeight) return null
+        val virtualAspect = virtualWidth / virtualHeight
+        val safeAspect = safeWidth / safeHeight
+        val fullAspect = panelWidth / panelHeight
+        return if (Math.abs(virtualAspect - safeAspect) < Math.abs(virtualAspect - fullAspect)) {
+            safeX + safeWidth * x / virtualWidth to safeY + safeHeight * y / virtualHeight
         } else {
-            x * panelWidth / virtualWidth to y * panelHeight / virtualHeight
+            panelWidth * x / virtualWidth to panelHeight * y / virtualHeight
         }
     }
 
-    /** Converts physical-panel coordinates to whichever source canvas CarLife encoded. */
+    /**
+     * Maps a panel point into the CarLife source, whichever rectangle the
+     * encoder was actually initialised with.
+     */
     fun mapPanelTouchToSource(
         panelX: Float,
         panelY: Float,
         sourceWidth: Int,
         sourceHeight: Int,
-    ): Pair<Float, Float>? {
+    ): Pair<Float, Float>? =
         if (sourceWidth == safeWidth && sourceHeight == safeHeight) {
-            return mapSafeTouchToSource(panelX, panelY, sourceWidth, sourceHeight)
+            mapSafeTouchToSource(panelX, panelY, sourceWidth, sourceHeight)
+        } else {
+            mapTouchToSource(panelX, panelY, sourceWidth, sourceHeight)
         }
-        return mapTouchToSource(panelX, panelY, sourceWidth, sourceHeight)
-    }
 }

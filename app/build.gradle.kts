@@ -43,9 +43,9 @@ android {
         // every build installed as 1.0.0 and an update over an existing install
         // looked like the same version to the package manager — which is what
         // made installing over an older build fail.
-        versionCode = 168
-        versionName = "1.2.48"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.48-168\"")
+        versionCode = 175
+        versionName = "1.2.55"
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.55-175-carlife-media-key-routing\"") // CarLife hardkey → Android MediaSession routing
     }
 
     buildFeatures { buildConfig = true }

@@ -52,7 +52,6 @@ internal class BluetoothBootstrap(
     private val identityId: String,
     private val transportIdentifier: String,
     private val trust: (authenticatedBluetooth: Boolean) -> AccessoryAuthentication,
-    private val hid: Iap2HidDispatcher,
     private val log: (String) -> Unit,
 ) : AutoCloseable {
 
@@ -62,9 +61,10 @@ internal class BluetoothBootstrap(
         ?: error("手机不支持蓝牙")
     private val peer: BluetoothDevice = bluetooth.getRemoteDevice(peerAddress)
     private val closed = AtomicBoolean()
-    private val nowPlaying = NowPlayingPublisher(context, log)
-    @Volatile private var nowPlayingSubscription = 0L
     private val owned = mutableListOf<AutoCloseable>()
+    // The GM head unit sends the iAP2 marker and its own SYN; the phone answers
+    // with an exact SYN/ACK echo. This is the sequence CarWith completed in the
+    // field, and the one this head unit confirms.
     private val profile = PhoneBluetoothProfile.ACCESSORY_FIRST
 
     @Volatile private var session: Iap2Session? = null
@@ -129,12 +129,7 @@ internal class BluetoothBootstrap(
             runCatching { session?.close() }
             runCatching { receiver?.join(1000) }
             val stream = openRestartStream(link.transport, restarted)
-            val next = Iap2Session.phoneBluetooth(
-                stream,
-                profile,
-                onTrace = {},
-                onFileTransferDatagram = { datagram -> nowPlaying.onFileTransferDatagram(datagram) },
-            )
+            val next = Iap2Session.phoneBluetooth(stream, profile) { }
             owned += next
             // The new instance starts in detection mode and must answer the
             // car's marker and SYN before any CSM may be sent; sending 0x1D00
@@ -205,23 +200,18 @@ internal class BluetoothBootstrap(
         onStage = log,
         onEndpoint = { endpoint.complete(it) },
         onOther = { frame ->
+            // Steering-wheel and panel buttons arrive as iAP2 HID messages on
+            // this channel; log the raw body so the button map can be built
+            // from real presses before any translation exists.
             if (frame.messageId in setOf(0x6800, 0x6802, 0x6803)) {
                 val body = frame.payload
                 log("车机按键消息 0x${frame.messageId.toString(16)} 长度=${body.size} " +
                     "hex=${body.joinToString(" ") { "%02X".format(it) }}")
-                hid.handle(frame, current::send)
             } else {
                 log("车机消息 0x${frame.messageId.toString(16)}")
             }
             // The head unit subscribes to phone status right after
             // authentication and keeps those subscriptions for the session.
-            if (frame.messageId == 0x5000) {
-                nowPlayingSubscription = nowPlaying.subscribe(frame, current::send, current::sendFileTransfer)
-                log("蓝牙 iAP2 0x5000：已开始真实 NowPlaying 发布")
-            } else if (frame.messageId == 0x5002) {
-                nowPlaying.unsubscribe(nowPlayingSubscription)
-                log("蓝牙 iAP2 0x5002：已停止 NowPlaying 发布")
-            }
             subscriptionReply(frame.messageId)?.let { reply ->
                 runCatching { current.send(reply) }
                     .onFailure { log("状态订阅回复失败：${it.message}") }
@@ -245,14 +235,18 @@ internal class BluetoothBootstrap(
      * each subscription; an unanswered request leaves the head unit waiting and
      * has been observed to end the session shortly after the video starts.
      */
-    private fun subscriptionReply(messageId: Int): com.carplay.iap2.wire.Iap2Frame? =
-        Iap2SubscriptionReplies.forRequest(messageId) ?: when (messageId) {
+    private fun subscriptionReply(messageId: Int): com.carplay.iap2.wire.Iap2Frame? = when (messageId) {
+        0x5000 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x5001) {
+            group(0) { void(0) }
+        }
         0x5200 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x5201) {
             u16(0, 0)
             u8(1, 0)
             u8(2, 0)
         }
         0xae00 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0xae01) { u8(0, 0) }
+        0x4157 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x4158) { u8(0, 0) }
+        0x4154 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x4155) { u8(0, 0) }
         else -> null
     }
 
@@ -280,8 +274,6 @@ internal class BluetoothBootstrap(
         val transport: PhoneBluetoothSessionTransport,
     )
 
-    private data class HandshakeAttempt(val link: Link?, val receivedBytes: Long)
-
     /**
      * Outbound first, then the phone's own listening service.
      *
@@ -305,72 +297,21 @@ internal class BluetoothBootstrap(
                 { log("手机 SDP 注册失败：${it.javaClass.simpleName}；继续手机主动连接") },
                 { log("主动连接未建立：${it.javaClass.simpleName}；改为等待车机连接") },
             )
-            val attempt = synchronize(connected, candidate, outbound)
-            attempt.link?.let { return it }
-
-            if (RfcommConnectionStrategy.shouldFallbackToInboundAfterSilentHandshake(
-                    RfcommConnectionDirection.PHONE_INITIATED,
-                    outbound,
-                    attempt.receivedBytes,
-                )
-            ) {
-                log("手机主动 RFCOMM 已连接但 iAP2 收到 0B；改等车机主动连入本机 iAP2 服务")
-                val inbound = try {
-                    listenInbound(SILENT_INBOUND_RECOVERY_TIMEOUT_MILLIS)
-                } catch (failure: IOException) {
-                    if (closed.get()) throw failure
-                    log("车机主动回连恢复未建立：${failure.message}")
-                    null
-                }
-                if (inbound != null) {
-                    synchronize(inbound, candidate, outbound = false).link?.let { return it }
-                }
+            owned += connected
+            val transport = PhoneBluetoothSessionTransport(BluetoothRfcommDuplexStream(connected) { })
+            owned += transport
+            val session = Iap2Session.phoneBluetooth(transport.open(), candidate) { }
+            owned += session
+            if (session.awaitPhoneBluetoothReady(candidate)) {
+                log("iAP2 链路已同步（${if (outbound) "手机主动" else "车机回连"}）")
+                return Link(connected, session, transport)
             }
             log("iAP2 同步未完成，换下一个握手方案")
+            runCatching { session.close() }
+            runCatching { transport.close() }
+            runCatching { connected.close() }
         }
         error("蓝牙 iAP2 同步失败：请确认车机屏幕上已选择本机")
-    }
-
-    private fun synchronize(
-        connected: BluetoothSocket,
-        candidate: PhoneBluetoothProfile,
-        outbound: Boolean,
-    ): HandshakeAttempt {
-        owned += connected
-        log(
-            "RFCOMM socket 已建立：方向=${if (outbound) "手机主动" else "车机回连"}，" +
-                "connected=${connected.isConnected}，bondState=${connected.remoteDevice.bondState}",
-        )
-        val transport = PhoneBluetoothSessionTransport(
-            BluetoothRfcommDuplexStream(connected) { log("蓝牙流诊断：$it") },
-        )
-        owned += transport
-        val traceHandshake = AtomicBoolean(true)
-        val session = Iap2Session.phoneBluetooth(
-            transport.open(),
-            candidate,
-            onTrace = { trace ->
-                if (traceHandshake.get()) log("iAP2 握手诊断：$trace")
-            },
-            onFileTransferDatagram = { datagram -> nowPlaying.onFileTransferDatagram(datagram) },
-        )
-        owned += session
-        val synchronized = session.awaitPhoneBluetoothReady(candidate)
-        traceHandshake.set(false)
-        val status = session.handshakeStatus()
-        if (synchronized) {
-            log("iAP2 链路已同步（${if (outbound) "手机主动" else "车机回连"}）")
-            return HandshakeAttempt(Link(connected, session, transport), status.receivedBytes)
-        }
-        log(
-            "iAP2 握手未完成：方向=${if (outbound) "手机主动" else "车机回连"}，方案=${candidate.label}，" +
-                "状态=${status.state}，已发=${status.sentBytes}B，已收=${status.receivedBytes}B，" +
-                "收到车机SYN=${status.peerSynchronization != null}，控制会话=${status.controlSessionId}",
-        )
-        runCatching { session.close() }
-        runCatching { transport.close() }
-        runCatching { connected.close() }
-        return HandshakeAttempt(null, status.receivedBytes)
     }
 
     private fun connectOutbound(): BluetoothSocket {
@@ -398,34 +339,25 @@ internal class BluetoothBootstrap(
         return registration.acquire()
     }
 
-    private fun listenInbound(timeoutMillis: Long = INBOUND_CONNECT_TIMEOUT_MILLIS): BluetoothSocket {
-        require(timeoutMillis > 0) { "timeoutMillis must be positive" }
+    private fun listenInbound(): BluetoothSocket {
         val listener = registerPhoneService()
-        log(
-            "等待车机回连本机 iAP2 服务，最多 ${TimeUnit.MILLISECONDS.toSeconds(timeoutMillis)} 秒；" +
-                "请在车机蓝牙列表中选择本机",
-        )
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        log("等待车机回连本机 iAP2 服务，最多 45 秒；请在车机蓝牙列表中选择本机")
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45)
         while (!closed.get() && System.nanoTime() < deadline) {
-            val remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
-                .coerceIn(1, Int.MAX_VALUE.toLong())
-            val accepted = try {
-                listener.accept(remainingMillis.toInt())
-            } catch (failure: IOException) {
-                if (closed.get()) throw IOException("连接已停止", failure)
-                if (System.nanoTime() >= deadline) break
-                throw failure
-            } ?: break
-            if (accepted.remoteDevice.address.equals(peerAddress, true) &&
-                accepted.remoteDevice.bondState == BluetoothDevice.BOND_BONDED
-            ) {
-                log("车机已回连本机")
-                return accepted
+            try {
+                val accepted = listener.accept()
+                if (accepted.remoteDevice.address.equals(peerAddress, true) &&
+                    accepted.remoteDevice.bondState == BluetoothDevice.BOND_BONDED
+                ) {
+                    log("车机已回连本机")
+                    return accepted
+                }
+                accepted.close()
+            } catch (_: IOException) {
+                if (closed.get()) error("连接已停止")
             }
-            accepted.close()
         }
-        val seconds = TimeUnit.MILLISECONDS.toSeconds(timeoutMillis)
-        throw IOException("${seconds} 秒内未收到车机的蓝牙回连；请在车机屏幕上选择本机")
+        error("45 秒内未收到车机的蓝牙回连；请在车机屏幕上选择本机")
     }
 
     /** Reads the link without consuming protocol frames; used only for diagnostics. */
@@ -433,7 +365,6 @@ internal class BluetoothBootstrap(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        nowPlaying.close()
         runCatching { receiver?.interrupt() }
         owned.reversed().forEach { runCatching { it.close() } }
         owned.clear()
@@ -442,14 +373,10 @@ internal class BluetoothBootstrap(
     }
 
     companion object {
-        private const val INBOUND_CONNECT_TIMEOUT_MILLIS = 45_000L
-        private const val SILENT_INBOUND_RECOVERY_TIMEOUT_MILLIS = 15_000L
-
         /** The phone's own CarPlay service; the car discovers this over SDP. */
         val PHONE_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
 
         /** The car's iAP2 service the phone dials. */
         val ACCESSORY_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacaff")
-
     }
 }

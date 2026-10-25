@@ -6,6 +6,7 @@ import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
 import android.os.Process
+import com.carplay.adapter.carlife.CarLifeBridge
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import kotlin.system.exitProcess
@@ -15,8 +16,15 @@ class CarLinkApplication : Application() {
         super.onCreate()
         CastLog.initialize(this)
         MediaCommandRouter.initialize(this)
+        initializeCarLifeMediaKeyDispatcher()
         installCrashHandler()
         recordPreviousProcessExit()
+    }
+
+    private fun initializeCarLifeMediaKeyDispatcher() {
+        CarLifeBridge.mediaKeyDispatcher = { androidKeyCode ->
+            MediaCommandRouter.dispatch(androidKeyCode)
+        }
     }
 
     private fun installCrashHandler() {

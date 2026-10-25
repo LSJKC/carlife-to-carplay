@@ -13,7 +13,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import com.carplay.adapter.PhoneProjectionAdapter
 import com.carplay.adapter.ProjectionGrant
-import com.carplay.adapter.carlife.CarLifeMediaSnapshot
 import com.carplay.adapter.carlife.CarLifeProjectionAdapter
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -35,12 +34,8 @@ class CastService : Service() {
     }
     @Volatile private var engine: CastEngine? = null
     private val stopping = AtomicBoolean()
-    private val destroyed = AtomicBoolean()
-    private val lifecycleLock = Any()
-    private var sessionQueued = false
-    private var pendingStart: PendingStart? = null
-    private var sessionGeneration = 0L
-    @Volatile private var activeAutomaticSession = false
+    /** Set once this session has recorded a real success for this car. */
+    @Volatile private var connectedRecorded = false
 
     /**
      * Locks that keep the session alive while the phone is in a pocket.
@@ -56,8 +51,6 @@ class CastService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        destroyed.set(false)
-        instance = this
         CastLog.initialize(this)
     }
 
@@ -72,179 +65,58 @@ class CastService : Service() {
             ACTION_START -> Unit
             else -> return START_NOT_STICKY
         }
-        requestStart(intent ?: Intent(this, CastService::class.java), startId)
-        return START_NOT_STICKY
-    }
-
-    private fun requestStart(intent: Intent, startId: Int) {
-        val automatic = intent.getBooleanExtra(EXTRA_AUTO_START, false)
-        var retired: CastEngine? = null
-        val generation: Long
-        synchronized(lifecycleLock) {
-            if (sessionQueued || engine != null) {
-                if (automatic) {
-                    // Android can emit several ACL_CONNECTED broadcasts while
-                    // the same Bluetooth handoff is settling. An automatic
-                    // broadcast must never retire a live session and start a
-                    // second CarLife process on top of it.
-                    CastLog.event("INFO", "忽略重复自动连接请求：当前会话仍在排队或运行")
-                    return
-                }
-                // One replacement is enough. Repeated ACL broadcasts must not
-                // build a queue of generations that all race the same car.
-                if (pendingStart == null) pendingStart = PendingStart(Intent(intent), startId)
-                stopping.set(true)
-                sessionGeneration++
-                retired = engine
-                CastLog.event("WARN", "收到新的连接请求：先退役旧 CarLife/AirPlay 会话，再开始新会话")
-                generation = sessionGeneration
-            } else {
-                sessionQueued = true
-                stopping.set(false)
-                sessionGeneration++
-                generation = sessionGeneration
-            }
-        }
-        retired?.close()
-        if (retired != null) return
-        runCatching { worker.execute { runSession(intent, startId, generation) } }
-            .onFailure {
-                if (automatic) AutoConnectCoordinator.recordFailure(settingsPeer())
-                CastLog.event("ERROR", "排队投屏会话失败：${it.message}")
-            }
-    }
-
-    /** Runs exactly one generation; a replacement is queued behind cleanup. */
-    private fun runSession(intent: Intent?, startId: Int, generation: Long) {
-        if (!isCurrent(generation)) {
-            finishSession(startId, null, generation)
-            return
-        }
-        val automatic = intent?.getBooleanExtra(EXTRA_AUTO_START, false) == true
+        if (engine != null) return START_NOT_STICKY
+        stopping.set(false)
         val settings = CastSettings(this)
-        val peer = settings.peerAddress
         val source = try {
             createSource(intent, settings)
         } catch (failure: Exception) {
             CastLog.begin("准备")
             CastLog.stop(failure.message ?: "无法准备投屏来源")
             notifyFailure(failure)
-            if (automatic) peer?.let { AutoConnectCoordinator.recordFailure(it) }
-            finishSession(startId, null, generation)
-            return
-        }
-        // A replacement request can arrive while createSource() is preparing
-        // the CarLife adapter. Do not publish a foreground session for a
-        // generation that has already been retired.
-        if (!isCurrent(generation)) {
-            finishSession(startId, null, generation)
-            return
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
         startForegroundNotification(source.name, source is MirrorSource)
         acquireSessionLocks()
-        val sessionId = CastLog.begin(source.name)
+        CastLog.begin(source.name)
         val session = CastEngine(applicationContext, settings, source) { message ->
-            if (CastLog.state.value.sessionId == sessionId) CastLog.event("INFO", message)
+            CastLog.event("INFO", message)
         }
-        val cancelledBeforePublish = synchronized(lifecycleLock) {
-            if (stopping.get() || generation != sessionGeneration) {
-                true
-            } else {
-                engine = session
-                activeAutomaticSession = automatic
-                false
-            }
-        }
-        if (cancelledBeforePublish) {
-            session.close()
-            releaseSessionLocks()
-            finishSession(startId, null, generation)
-            return
-        }
-        runCatching { worker.execute {
-            // requestStart() may have retired this generation after it was
-            // published but before the queued engine task got CPU time.
-            if (!isCurrent(generation) || engine !== session) {
-                session.close()
-                finishSession(startId, session, generation)
-                return@execute
-            }
-            val failureRecorded = AtomicBoolean(false)
-            fun recordAutomaticFailure() {
-                if (automatic && failureRecorded.compareAndSet(false, true)) {
-                    peer?.let { AutoConnectCoordinator.recordFailure(it) }
-                }
-            }
+        engine = session
+        worker.execute {
             session.run { failure ->
-                if (isCurrent(generation) && CastLog.state.value.sessionId == sessionId) {
+                if (!stopping.get()) {
                     CastLog.stop(failure.message ?: failure.javaClass.simpleName)
                     notifyFailure(failure)
                 }
-                recordAutomaticFailure()
-                // Failure callbacks can arrive from an AirPlay worker while
-                // awaitSessionEnd is still waiting. Close immediately so the
-                // CarLife host/audio route is released before the next ACL.
-                session.close()
             }
             // run() returns once the AirPlay worker is started; the session's
             // real lifetime is tracked by the engine.
-            awaitSessionEnd(session, sessionId, generation, automatic)
-            // A worker can finish without invoking the callback when it is
-            // closed by the remote side during teardown. Only the terminal
-            // FAILED state counts as an automatic-attempt failure; a normal
-            // startup return must never enter backoff.
-            if (CastLog.state.value.sessionId == sessionId &&
-                CastLog.state.value.stage == CastStage.FAILED
-            ) {
-                recordAutomaticFailure()
-            }
-            finishSession(startId, session, generation)
-        } }.onFailure {
-            session.close()
-            if (automatic) peer?.let { AutoConnectCoordinator.recordFailure(it) }
-            CastLog.event("ERROR", "启动投屏工作线程失败：${it.message}")
+            awaitSessionEnd(session)
+            finishSession(startId)
         }
+        return START_NOT_STICKY
     }
-
-    private fun isCurrent(generation: Long): Boolean =
-        synchronized(lifecycleLock) {
-            generation == sessionGeneration && !stopping.get()
-        }
 
     private fun createSource(intent: Intent?, settings: CastSettings): PhoneProjectionAdapter {
         val mode = settings.sourceMode
         val carLife = CarLifeProjectionAdapter()
         val useCarLife = mode != SourceMode.MIRROR && carLife.isSupported(this)
         if (useCarLife) {
-            // Fallback until AirPlay /info provides this session's full display
-            // and optional safeArea; AirPlayLink replaces the geometry before prepare().
-            val panel = com.carplay.adapter.carlife.CarLifePanel(
+            // Use only the GM canvas that this session actually negotiates.
+            // There is no independently negotiated outer panel when /info has no
+            // viewAreas, so never inject inferred iPhone physical-panel offsets.
+            carLife.panel = com.carplay.adapter.carlife.CarLifePanel(
                 panelWidth = CarPanelGeometry.PANEL_WIDTH,
                 panelHeight = CarPanelGeometry.PANEL_HEIGHT,
                 safeX = CarPanelGeometry.SAFE_X,
                 safeY = CarPanelGeometry.SAFE_Y,
                 safeWidth = CarPanelGeometry.SAFE_WIDTH,
                 safeHeight = CarPanelGeometry.SAFE_HEIGHT,
-                drawUiOutsideSafeArea = true,
-                needAdapterScreen = true,
+                drawUiOutsideSafeArea = false,
+                needAdapterScreen = false,
             )
-            carLife.panel = panel
-            carLife.mediaSnapshotProvider = {
-                MediaSessionSnapshotStore.current?.let { snapshot ->
-                    CarLifeMediaSnapshot(
-                        title = snapshot.title,
-                        artist = snapshot.artist,
-                        album = snapshot.album,
-                        lyrics = snapshot.lyrics,
-                        durationMs = snapshot.durationMs,
-                        positionMs = snapshot.positionMs,
-                        playing = snapshot.state == 1,
-                        packageName = snapshot.packageName,
-                        artworkBytes = snapshot.artwork,
-                    )
-                }
-            }
-            carLife.videoProcessor = CarLifePanelCompositor(panel)
             return carLife
         }
         if (mode == SourceMode.CARLIFE) error("未找到手机自带的 CarLife 应用")
@@ -308,104 +180,31 @@ class CastService : Service() {
      * send the driver straight past Honor's first-connection flow into a
      * session that cannot work.
      */
-    private fun awaitSessionEnd(
-        session: CastEngine,
-        sessionId: String,
-        generation: Long,
-        automatic: Boolean,
-    ) {
-        val peer = CastSettings(this).peerAddress
-        var stableSince = 0L
-        var lastProgress = 0L
-        var lastFrames = -1L
-        var recorded = false
+    private fun awaitSessionEnd(session: CastEngine) {
         while (!stopping.get() && !session.hasFinished()) {
             Thread.sleep(300)
-            val state = CastLog.state.value
-            if (state.sessionId != sessionId || generation != synchronized(lifecycleLock) { sessionGeneration }) {
-                continue
-            }
-            val now = android.os.SystemClock.elapsedRealtime()
-            val stable = state.stage == CastStage.STREAMING &&
-                state.frames > 0 &&
-                session.isHealthy()
-            if (!stable) {
-                stableSince = 0L
-                lastProgress = 0L
-                lastFrames = state.frames
-                continue
-            }
-            if (state.frames > lastFrames) {
-                if (stableSince == 0L) stableSince = now
-                lastProgress = now
-                lastFrames = state.frames
-            }
-            if (!recorded &&
-                stableSince > 0L &&
-                now - stableSince >= STABLE_SUCCESS_WINDOW_MS &&
-                now - lastProgress <= FRAME_STALL_GRACE_MS
-            ) {
-                recorded = true
+            if (!connectedRecorded && CastLog.state.value.frames > 0) {
+                connectedRecorded = true
+                val peer = CastSettings(this).peerAddress
                 if (peer != null) {
                     CastSettings(this).markConnected(peer)
-                    AutoConnectCoordinator.recordSuccess(peer)
-                    CastLog.event(
-                        "INFO",
-                        "画面稳定 ${STABLE_SUCCESS_WINDOW_MS / 1000}s，已记录该车机连接成功；" +
-                            if (automatic) "自动重连已解除冷却" else "手动会话",
-                    )
+                    CastLog.event("INFO", "已记录该车机连接成功，下次可直接连接")
                 }
             }
         }
-        if (!stopping.get() && CastLog.state.value.sessionId == sessionId) {
+        if (!stopping.get()) {
             val state = CastLog.state.value
             if (state.stage != CastStage.FAILED) CastLog.stop()
         }
     }
 
-    private fun finishSession(startId: Int, finishedSession: CastEngine?, generation: Long) {
-        if (destroyed.get()) {
-            runCatching { finishedSession?.close() }
-            return
-        }
-        runCatching { cleanup.execute {
-            val shouldRelease = synchronized(lifecycleLock) {
-                val wasPublishedEngine = finishedSession != null && engine === finishedSession
-                if (wasPublishedEngine) engine = null
-                wasPublishedEngine || (finishedSession == null && generation == sessionGeneration)
-            }
-            finishedSession?.close()
-            if (shouldRelease) {
-                activeAutomaticSession = false
-                AutoConnectCoordinator.release(CastSettings(this).peerAddress)
-            }
-            if (shouldRelease) releaseSessionLocks()
-            val next = synchronized(lifecycleLock) {
-                val value = pendingStart
-                pendingStart = null
-                if (value != null && engine == null) {
-                    // A duplicate Bluetooth broadcast can retire a generation
-                    // before its engine is published. Start the one coalesced
-                    // replacement even though the finishing generation is
-                    // already stale.
-                    sessionQueued = true
-                    stopping.set(false)
-                } else if (value == null && generation == sessionGeneration) {
-                    sessionQueued = false
-                }
-                value
-            }
-            if (next != null) {
-                val nextGeneration = synchronized(lifecycleLock) { sessionGeneration }
-                runCatching { worker.execute { runSession(next.intent, next.startId, nextGeneration) } }
-                    .onFailure { CastLog.event("ERROR", "排队下一次投屏失败：${it.message}") }
-            } else if (generation == synchronized(lifecycleLock) { sessionGeneration }) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf(startId)
-            }
-        } }.onFailure {
-            runCatching { finishedSession?.close() }
-            CastLog.event("ERROR", "投屏清理线程不可用：${it.message}")
+    private fun finishSession(startId: Int) {
+        cleanup.execute {
+            engine?.close()
+            engine = null
+            releaseSessionLocks()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
         }
     }
 
@@ -454,93 +253,36 @@ class CastService : Service() {
     }
 
     private fun stopSession(reason: String) {
-        var retired: CastEngine? = null
-        synchronized(lifecycleLock) {
-            pendingStart = null
-            stopping.set(true)
-            sessionGeneration++
-            retired = engine
-        }
+        if (!stopping.compareAndSet(false, true)) return
         CastLog.stop(reason)
-        retired?.close()
-        if (destroyed.get()) {
-            runCatching { retired?.close() }
-            return
-        }
-        runCatching { cleanup.execute {
-            synchronized(lifecycleLock) {
-                if (engine === retired) engine = null
-                sessionQueued = false
-            }
+        cleanup.execute {
+            engine?.close()
+            engine = null
             releaseSessionLocks()
-            AutoConnectCoordinator.release(CastSettings(this).peerAddress)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
-        } }.onFailure {
-            runCatching { retired?.close() }
-            CastLog.event("ERROR", "停止投屏清理失败：${it.message}")
         }
-    }
-
-    private fun onBluetoothDisconnected(address: String) {
-        val settings = CastSettings(this)
-        if (!address.equals(settings.peerAddress, ignoreCase = true)) return
-        val current = synchronized(lifecycleLock) { engine }
-        if (current == null) return
-        if (current.isWirelessHandoffComplete()) {
-            CastLog.event("INFO", "车机蓝牙已断开，但 Wi-Fi 控制已完成交接，保留 CarLife 会话")
-            return
-        }
-        if (activeAutomaticSession) {
-            AutoConnectCoordinator.recordFailure(address)
-        }
-        CastLog.event("WARN", "车机蓝牙已断开且尚未完成 Wi-Fi 交接，自动释放 CarLife 会话")
-        stopSession("车机蓝牙已断开")
     }
 
     override fun onDestroy() {
-        destroyed.set(true)
         runCatching { engine?.close() }
         engine = null
-        activeAutomaticSession = false
         // Every way a session can end goes through here or finishSession(); a
         // single missed path would leave the CPU lock held and drain the phone
         // long after the car is parked.
         releaseSessionLocks()
-        AutoConnectCoordinator.release(CastSettings(this).peerAddress)
         worker.shutdownNow()
         cleanup.shutdown()
-        if (instance === this) instance = null
         super.onDestroy()
     }
 
-    private fun settingsPeer(): String =
-        CastSettings(this).peerAddress.orEmpty().ifBlank { "UNKNOWN" }
-
     companion object {
-        private data class PendingStart(val intent: Intent, val startId: Int)
         const val ACTION_START = "com.carlink.cast.START"
         const val ACTION_STOP = "com.carlink.cast.STOP"
-        const val EXTRA_AUTO_START = "autoStart"
         const val EXTRA_CAPTURE = "capture"
         const val EXTRA_CAPTURE_RESULT = "captureResult"
         private const val CHANNEL = "cast"
         private const val FOREGROUND_ID = 11
         private const val FAILURE_ID = 12
-        private const val STABLE_SUCCESS_WINDOW_MS = 4_000L
-        private const val FRAME_STALL_GRACE_MS = 1_200L
-        @Volatile private var instance: CastService? = null
-
-        fun isBusy(): Boolean {
-            val service = instance ?: return false
-            synchronized(service.lifecycleLock) {
-                return service.sessionQueued || service.engine != null || service.pendingStart != null
-            }
-        }
-
-        fun onBluetoothDisconnected(context: android.content.Context, address: String) {
-            val service = instance ?: return
-            service.onBluetoothDisconnected(address)
-        }
     }
 }

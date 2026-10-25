@@ -227,7 +227,30 @@ class CarLifeHostService : Service() {
     private val keyListener = object : IRemoteKeyListener.Stub() {
         override fun onKeyEvent(event: android.view.KeyEvent?): Boolean {
             event ?: return false
-            CarLifeBridge.key?.invoke(event.keyCode, event.action == android.view.KeyEvent.ACTION_DOWN)
+            val carLifeCode = event.keyCode
+            val androidCode = CarLifeHardKey.toAndroid(carLifeCode)
+
+            // First, try media key routing if applicable
+            if (androidCode != null && event.action == android.view.KeyEvent.ACTION_DOWN) {
+                val isMediaKey = androidCode in setOf(
+                    android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
+                    android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+                    android.view.KeyEvent.KEYCODE_MEDIA_PAUSE,
+                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                    android.view.KeyEvent.KEYCODE_MEDIA_STOP,
+                )
+                if (isMediaKey) {
+                    val dispatched = CarLifeBridge.mediaKeyDispatcher?.invoke(androidCode) ?: false
+                    if (dispatched) {
+                        CarLifeBridge.log("车机硬键已路由到 MediaSession：CarLife=$carLifeCode → Android=$androidCode")
+                        return true
+                    }
+                }
+            }
+
+            // Fall back to the standard key callback
+            CarLifeBridge.key?.invoke(carLifeCode, event.action == android.view.KeyEvent.ACTION_DOWN)
             return true
         }
     }
@@ -329,7 +352,7 @@ class CarLifeHostService : Service() {
  * process boundary that the adapter itself cannot see; this holds the current
  * session's hooks for the service to reach.
  */
-internal object CarLifeBridge {
+object CarLifeBridge {
     /** Diagnostics sink, set while a session is live. */
     @Volatile var log: (String) -> Unit = {}
 
@@ -338,6 +361,9 @@ internal object CarLifeBridge {
 
     /** Car key events. */
     @Volatile var key: ((Int, Boolean) -> Unit)? = null
+
+    /** Media key dispatcher for routing CarLife hardkeys to Android MediaSession. */
+    @Volatile var mediaKeyDispatcher: ((Int) -> Boolean)? = null
 
     /** Audio delivered through the host callback, if this CarLife build uses it. */
     @Volatile var audio: ((ByteArray, Int) -> Unit)? = null
@@ -410,7 +436,8 @@ internal object CarLifeBridge {
      * vendor parameters. It intentionally leaves the negotiated codec width,
      * height, and frame rate untouched.
      */
-    fun invoke(action: String, extras: Bundle?): Bundle? = when (action) {
+    fun invoke(action: String, extras: Bundle?): Bundle? {
+        return when (action) {
         "carlife_connect_audio_type" -> {
             val audioType = extras?.getInt("audioType", 1) ?: 1
             log("CarLife 音频通道通知：audioType=$audioType，保持 CarPlay 媒体音频由车机协商")
@@ -454,7 +481,7 @@ internal object CarLifeBridge {
                     "安全区 ${format.safeWidth}x${format.safeHeight}@(${format.safeX},${format.safeY})；" +
                     "保持 CarLife 编码宽高/FPS不变",
             )
-            Bundle().apply {
+            return Bundle().apply {
                 overrides.forEach { (key, value) ->
                     when (value) {
                         is Int -> putInt(key, value)
@@ -467,6 +494,7 @@ internal object CarLifeBridge {
             }  // ← 关键修复：返回这个 Bundle，使得 overrides 被真正应用
         }
         else -> null
+        }
     }
 
     private const val CARLIFE_ENCODER_FORMAT = "carlife_encode_format"

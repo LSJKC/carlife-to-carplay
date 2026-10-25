@@ -26,7 +26,28 @@ data class CarLifeMediaSnapshot(
     val packageName: String = "",
     val artwork: Bitmap? = null,
     val artworkBytes: ByteArray? = null,
+    // 增强的应用上下文信息（对标 iPhone 实机 Endpoint）
+    val applicationPid: Int = 0,
+    val applicationName: String = "",
+    val audioSessionId: Int = 0,
 )
+
+/**
+ * 媒体应用的完整上下文信息，对标 iPhone 实机的 NowPlaying Endpoint
+ *
+ * iPhone 实机格式：【 LOCL (iPhone) ❯ com.package (PID) AppName ❯ audio_category 】
+ * Android 目标格式：【 LOCAL (Android) ❯ com.package (PID) AppName ❯ audio_category 】
+ */
+internal data class MediaApplicationContext(
+    val packageName: String = "",
+    val pid: Int = 0,
+    val appName: String = "",
+    val audioCategory: String = "default",
+) {
+    override fun toString(): String {
+        return "【 LOCAL (Android) ❯ $packageName ($pid) $appName ❯ $audioCategory 】"
+    }
+}
 
 /**
  * Publishes one shared Android MediaSession snapshot through both CarLife
@@ -39,7 +60,7 @@ data class CarLifeMediaSnapshot(
  * callback is kept because some CarLife builds only update their card from it.
  */
 internal class CarLifeMediaPublisher(
-    context: Context,
+    private val context: Context,
     private val log: (String) -> Unit,
     private val fallback: (() -> CarLifeMediaSnapshot?)? = null,
 ) : AutoCloseable {
@@ -64,16 +85,22 @@ internal class CarLifeMediaPublisher(
     private var emptySessionLogged = false
     private val nowPlayingEmptyLogged = java.util.concurrent.atomic.AtomicBoolean()
 
+    // 诊断统计
+    private var pollCount = 0L
+    private var lastLoggedEndpoint: String? = null
+
     fun start() {
         if (closed || started) return
         synchronized(this) {
             if (closed || started) return
             started = true
+            pollCount = 0
+            log("[媒体] CarLife 媒体发布器启动: poll_interval=1s")
             runCatching {
                 executor.scheduleWithFixedDelay(::publish, 0, 1, TimeUnit.SECONDS)
             }.onFailure {
                 started = false
-                if (!closed) log("CarLife 媒体发布器启动失败：${it.message}")
+                if (!closed) log("[媒体] CarLife 媒体发布器启动失败：${it.message}")
             }
         }
     }
@@ -175,6 +202,17 @@ internal class CarLifeMediaPublisher(
          */
         val now = android.os.SystemClock.elapsedRealtime()
         val infoChanged = key != lastKey
+
+        // 增强的诊断日志（对标 iPhone tracev3）
+        pollCount++
+        if (infoChanged) {
+            val appContext = extractApplicationContext(source, controller)
+            if (lastLoggedEndpoint != appContext.toString()) {
+                lastLoggedEndpoint = appContext.toString()
+                log("[媒体] 轮询周期 #$pollCount - 媒体变化")
+                log("  [Endpoint] $appContext")
+            }
+        }
         if (infoChanged || now - lastInfoSentAt >= INFO_RETRY_INTERVAL_MS) {
             lastKey = key
             lastInfoSentAt = now
@@ -194,11 +232,17 @@ internal class CarLifeMediaPublisher(
             cover?.let { intent.putExtra("cover", it) }
             runCatching { app.sendBroadcast(intent) }
                 .onFailure { log("CarLife 媒体信息广播失败：${it.message}") }
+            // 增强的诊断日志
             log(
-                "CarLife 媒体信息：song=${title.ifBlank { "<空>" }} " +
+                "  [Metadata] title=${title.ifBlank { "<空>" }} " +
                     "artist=${artist.ifBlank { "<空>" }} album=${album.ifBlank { "<空>" }} " +
-                    "lyrics=${lyrics.isNotBlank()} cover=${cover != null}",
+                    "duration=${duration}ms"
             )
+            log(
+                "  [Playback] playing=$playing position=$boundedPosition ms" +
+                    " lyrics=${lyrics.isNotBlank()} cover=${cover != null}"
+            )
+            log("  [Status] 发送 MusicInfo via AIDL + Intent via 广播")
         }
 
         if (boundedPosition != lastPosition || infoChanged) {
@@ -314,6 +358,44 @@ internal class CarLifeMediaPublisher(
             }
         }.getOrNull()
         return fallbackArtworkBitmap
+    }
+
+    /**
+     * 提取媒体应用的完整上下文信息，对标 iPhone 实机 NowPlaying Endpoint
+     * 格式：【 LOCAL (Android) ❯ com.package (PID) AppName ❯ audio_category 】
+     */
+    private fun extractApplicationContext(packageName: String, controller: MediaController?): MediaApplicationContext {
+        val pid = getApplicationPid(packageName)
+        val appName = getApplicationName(packageName)
+        val audioCategory = "playback"  // Android 上通常使用 playback
+
+        return MediaApplicationContext(
+            packageName = packageName,
+            pid = pid,
+            appName = appName,
+            audioCategory = audioCategory
+        )
+    }
+
+    /**
+     * 通过 ActivityManager 获取应用的进程 ID
+     */
+    private fun getApplicationPid(packageName: String): Int {
+        return runCatching {
+            val am = app.getSystemService(android.app.ActivityManager::class.java) ?: return@runCatching 0
+            val processes = am.runningAppProcesses ?: return@runCatching 0
+            processes.find { it.processName == packageName }?.pid ?: 0
+        }.getOrDefault(0)
+    }
+
+    /**
+     * 通过 PackageManager 获取应用的显示名称
+     */
+    private fun getApplicationName(packageName: String): String {
+        return runCatching {
+            val pm = app.packageManager
+            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+        }.getOrDefault(packageName)
     }
 
     override fun close() {

@@ -335,6 +335,7 @@ internal class AirPlayLink(
             val panel = CarPanelGeometry.panelFor(display)
             carLife.panel = panel
             val safeAreaPolicy = settings.safeAreaPolicy(peerAddress)
+            carLife.safeAreaPolicy = safeAreaPolicy
             (carLife.videoProcessor as? CarLifePanelCompositor)?.let { compositor ->
                 compositor.updateSafeAreaPolicy(safeAreaPolicy)
                 compositor.updatePanel(panel)

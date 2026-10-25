@@ -419,8 +419,10 @@ internal object CarLifeProto {
      * VIDEO_ENCODER_INIT.
      *
      * Fields 1-3 are the encoder size and rate. Fields 4-9 describe the panel
-     * and safe rectangle. This host composites wallpaper separately, so it
-     * keeps CarLife UI inside that rectangle instead of asking it to draw outside.
+     * around that encoder: this car's physical panel is wider than the area
+     * CarLife may draw in, and CarLife positions its UI from these rather than
+     * centring it. They used to be omitted and defaulted to zero, which is what
+     * put the picture at the far left of the irregular panel.
      */
     fun videoEncoderInfo(
         width: Int,

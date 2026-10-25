@@ -690,7 +690,7 @@ class AirPlaySession(
                         result.add(linkedMapOf("type" to type, "dataPort" to port))
                     }
                 }
-                STREAM_TYPE_MAIN_AUDIO, STREAM_TYPE_ALT_AUDIO, STREAM_TYPE_MAIN_HIGH_AUDIO -> {
+                STREAM_TYPE_MAIN_AUDIO, STREAM_TYPE_ALT_AUDIO, STREAM_TYPE_MAIN_HIGH_AUDIO, STREAM_TYPE_AUX_AUDIO -> {
                     val streamResponse = media.onAudio(this, type, stream)
                     debugLog(
                         "airplay audio stream type=$type accepted=${streamResponse != null} " +
@@ -945,6 +945,7 @@ class AirPlaySession(
         const val STREAM_TYPE_MAIN_AUDIO = 100
         const val STREAM_TYPE_ALT_AUDIO = 101
         const val STREAM_TYPE_MAIN_HIGH_AUDIO = 102
+        const val STREAM_TYPE_AUX_AUDIO = 106  // Opus speechRecognition (真机实测)
         const val STREAM_TYPE_DATA = 130
         const val STREAM_TYPE_MAIN_BUFFERED_AUDIO = 103
         private val BUFFERED_AUDIO_METHODS = setOf("SETRATE", "SETRATEANCHORTIME", "GETANCHOR", "FLUSHBUFFERED")

@@ -117,6 +117,30 @@ internal object CarLifeHardKey {
         else -> null
     }
 
+    /**
+     * Translates a CarLife key code back to Android's enumeration.
+     *
+     * This is used when the car sends hard keys through the AIDL callback,
+     * which we need to route to Android's MediaSession. Only media-control
+     * codes are meaningful here (NEXT, PREVIOUS, PLAY, STOP).
+     */
+    fun toAndroid(carLifeCode: Int): Int? = when (carLifeCode) {
+        NEXT -> android.view.KeyEvent.KEYCODE_MEDIA_NEXT
+        PREVIOUS -> android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS
+        PLAY -> android.view.KeyEvent.KEYCODE_MEDIA_PLAY
+        STOP -> android.view.KeyEvent.KEYCODE_MEDIA_STOP
+        OK -> android.view.KeyEvent.KEYCODE_DPAD_CENTER
+        BACK -> android.view.KeyEvent.KEYCODE_BACK
+        UP -> android.view.KeyEvent.KEYCODE_DPAD_UP
+        DOWN -> android.view.KeyEvent.KEYCODE_DPAD_DOWN
+        LEFT -> android.view.KeyEvent.KEYCODE_DPAD_LEFT
+        RIGHT -> android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+        ANSWER -> android.view.KeyEvent.KEYCODE_CALL
+        HANG_UP -> android.view.KeyEvent.KEYCODE_ENDCALL
+        VR_START -> android.view.KeyEvent.KEYCODE_VOICE_ASSIST
+        else -> null
+    }
+
     /** Human-readable name for the diagnostic line. */
     fun describe(keyCode: Int): String = android.view.KeyEvent.keyCodeToString(keyCode)
 }

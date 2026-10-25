@@ -77,7 +77,27 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * keeps its controls inside the supplied safe area.
      */
     @Volatile
-    var panel: CarLifePanel? = null
+    private var _panel: CarLifePanel? = null
+    var panel: CarLifePanel?
+        get() = _panel
+        set(value) {
+            val old = _panel
+            _panel = value
+            if (old != value && value != null) {
+                observer?.diagnostic(
+                    "安全区初始化：panel=${value.panelWidth}x${value.panelHeight}, " +
+                        "safe=@(${value.safeX},${value.safeY})/${value.safeWidth}x${value.safeHeight}, " +
+                        "drawUiOutside=${value.drawUiOutsideSafeArea}, needAdapterScreen=${value.needAdapterScreen}",
+                )
+            }
+        }
+
+    /**
+     * Safe area policy from settings (STRICT/RELAXED/CUSTOM/OFF).
+     * Controls whether CarLife source encodes at full panel or safe-area size.
+     */
+    @Volatile
+    var safeAreaPolicy: Any? = null
 
     @Volatile
     var videoProcessor: CarLifeVideoProcessor? = null
@@ -563,6 +583,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             onFailure = { error ->
                 observer?.failed(error)
             },
+            container = this,
         )
         val publisher = CarLifeMediaPublisher(
             checkNotNull(hostContext),
@@ -586,7 +607,20 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             CarLifeBridge.touch = { action, x, y ->
                 handleBridgeTouch(live, action, x, y, observer)
             }
-            CarLifeBridge.key = { code, down -> if (down) live.key(code) }
+            CarLifeBridge.key = lambda@{ carLifeCode, down ->
+                if (!down) {
+                    return@lambda  // Only handle key-down
+                }
+                // Convert CarLife code back to Android KeyEvent code and route to MediaSession
+                val androidCode = CarLifeHardKey.toAndroid(carLifeCode)
+                if (androidCode != null) {
+                    // Emit diagnostic with Android KeyEvent code, routing will be handled
+                    // by the Dispatch layer in the app module
+                    observer?.diagnostic(
+                        "车机硬键已转换：CarLife code=$carLifeCode → Android KeyCode=$androidCode"
+                    )
+                }
+            }
             CarLifeBridge.audio = { pcm, sampleRate ->
                 handleBridgeAudio(pcm, sampleRate, observer)
             }
@@ -645,21 +679,31 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
         val virtualWidth = CarLifeBridge.castWidth.takeIf { it > 0 } ?: targetWidth
         val virtualHeight = CarLifeBridge.castHeight.takeIf { it > 0 } ?: targetHeight
         val geometry = panel
+
+        // Step 1: Virtual coordinate → Panel coordinate (using safe area mapping if available)
         val panelPoint = geometry?.mapVirtualTouchToPanel(x, y, virtualWidth, virtualHeight)
         val panelX = panelPoint?.first ?: x * targetWidth / virtualWidth
         val panelY = panelPoint?.second ?: y * targetHeight / virtualHeight
+        val usedSafeAreaMapping = panelPoint != null
+
+        // Step 2: Panel coordinate → Source coordinate (using video processor or panel geometry)
         val sourcePoint = if (videoProcessor != null) {
             videoProcessor?.mapTouchToSource(panelX, panelY)
         } else {
             geometry?.mapPanelTouchToSource(panelX, panelY, targetWidth, targetHeight)
         }
+
+        // Step 3: Validate against safe area constraints
         if (geometry != null && sourcePoint == null) {
             observer?.diagnostic(
-                "CarLife Binder 触控落在安全区外：panel=(${"%.1f".format(panelX)}," +
-                    "${"%.1f".format(panelY)})，已忽略",
+                "CarLife 触控安全区验证：panel=(${"%.1f".format(panelX)}," +
+                    "${"%.1f".format(panelY)}) 落在安全区外 " +
+                    "[safe=${geometry.safeX},${geometry.safeY},${geometry.safeWidth}x${geometry.safeHeight}]，已忽略",
             )
             return
         }
+
+        // Step 4: Final clamping to source bounds
         val mappedX = sourcePoint?.first ?: panelX.coerceIn(
             0f,
             (targetWidth - 1).coerceAtLeast(0).toFloat(),
@@ -668,13 +712,26 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             0f,
             (targetHeight - 1).coerceAtLeast(0).toFloat(),
         )
-        if (bridgeTouchLogged < 8) {
+
+        // Comprehensive diagnostic logging
+        if (bridgeTouchLogged < 16) {
+            val panelInfo = if (geometry != null) {
+                "panel=${geometry.panelWidth}x${geometry.panelHeight}@(${geometry.safeX},${geometry.safeY}/${geometry.safeWidth}x${geometry.safeHeight}), "
+            } else {
+                ""
+            }
+            val processorInfo = if (videoProcessor != null) {
+                "通过视频处理器"
+            } else if (usedSafeAreaMapping) {
+                "通过安全区映射"
+            } else {
+                "简单缩放"
+            }
             observer?.diagnostic(
-                "CarLife Binder 触控映射 #${bridgeTouchLogged++}: " +
-                    "virtual=(${"%.1f".format(x)},${"%.1f".format(y)}) " +
-                    "${virtualWidth}x$virtualHeight -> " +
-                    "panel=(${"%.1f".format(panelX)},${"%.1f".format(panelY)}) " +
-                    "source=(${mappedX.toInt()},${mappedY.toInt()}) ${targetWidth}x$targetHeight",
+                "触控映射 #${bridgeTouchLogged++}: [virtual(${"%.0f".format(x)},${"%.0f".format(y)})@${virtualWidth}x$virtualHeight]" +
+                    " → [panel(${"%.1f".format(panelX)},${"%.1f".format(panelY)})] " +
+                    "→ [source(${"%.0f".format(mappedX)},${"%.0f".format(mappedY)})@${targetWidth}x$targetHeight] " +
+                    "${panelInfo}$processorInfo",
             )
         }
         live.touch(action, mappedX.toInt(), mappedY.toInt())

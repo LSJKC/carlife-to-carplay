@@ -155,6 +155,14 @@ internal class CarLifePanelCompositor(
         diagnostic = onDiagnostic
         failed = onFailure
         needKeyFrame = onNeedKeyFrame
+
+        // Log panel and safe area configuration at start
+        onDiagnostic(
+            "画布合成启动：panel=${panel.panelWidth}x${panel.panelHeight}, " +
+                "safe@(${panel.safeX},${panel.safeY})/${panel.safeWidth}x${panel.safeHeight}, " +
+                "safeAreaPolicy=${safeAreaPolicy.mode} enabled=${safeAreaPolicy.enabled}",
+        )
+
         outputAvcC = null
         nextOutputPtsUs = 0L
         renderedFrames = 0L
