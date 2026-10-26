@@ -1164,20 +1164,47 @@ class AirPlaySender(
             events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
         }
         /*
-         * Bring up the companion LPCM stream.
+         * Bring up the companion stream.
          *
-         * A working sender on this head unit runs two: type 101 `default` and
-         * type 100 `media`. The car reports a growing sampleTime for BOTH, so
-         * this is not a main/backup pair — the head unit really does consume
-         * both, and with only one stream up its audio path looked alive while
-         * the session still died. Each stream gets its own SETUP, dataPort and
+         * The iPhone on this car runs two streams at once, and the sysdiagnose
+         * names both:
+         *
+         *   AudioMain  MainHighAudio/media, AAC, 48000 Hz, Stereo, 1024 spf
+         *   AudioAlt   AltAudio/default,  Opus, 48000 Hz, Mono,     960 spf
+         *
+         * The car reports a growing `sampleTime` for BOTH in its /feedback
+         * reply, so this is not a main/backup pair — the head unit really does
+         * consume both. Each stream needs its own SETUP, dataPort and
          * encryption key; they cannot share one.
          *
-         * Only LPCM does this. AAC already is the single media stream the car
-         * expects, and adding a second AAC stream is not something any working
-         * sender does.
+         * Earlier builds only opened the companion for LPCM mains, which meant
+         * the AAC path — the one this car actually negotiates — never had a
+         * second stream at all.
          */
-        if (format.isPcm) setupCompanionAudio(wire, format, shared, address)
+        setupCompanionAudio(wire, format, shared, address)
+    }
+
+    /**
+     * The `(audioFormat, samplesPerPacket)` pair for the companion stream.
+     *
+     * Taken from the iPhone sysdiagnose for this head unit, which is the only
+     * source that shows both streams' negotiated formats:
+     *
+     *   AudioMain  MainHighAudio/media, AAC, 48000 Hz, Stereo, 1024 spf, 0x00800000
+     *   AudioAlt   AltAudio/default,  Opus, 48000 Hz, Mono,     960 spf, 0x40000000
+     *
+     * `0x40000000` is Opus 48 kHz mono in the `audioOutputFormats` bit space
+     * this car advertises, and it is exactly what /info lists for its
+     * `type=101 audioType=default` entry.
+     *
+     * When the main stream is not AAC the companion falls back to the same
+     * LPCM shape the receiver accepted for type 100, because a receiver that
+     * took LPCM for the main stream will not take Opus here.
+     */
+    private fun companionFormat(main: SenderAudioFormat): Pair<Long, Int> = when {
+        main.codec == com.carplay.airplay.AudioCodecKind.AAC_LC ->
+            COMPANION_OPUS_FORMAT to COMPANION_OPUS_SAMPLES_PER_PACKET
+        else -> main.formatBits to main.samplesPerPacket
     }
 
     /**
@@ -1198,6 +1225,25 @@ class AirPlaySender(
             else -> return
         }
         val companionAudioType = if (companionType == 101) "default" else "media"
+        /*
+         * The companion does not reuse the main stream's format.
+         *
+         * The iPhone sysdiagnose for this car shows the two streams carrying
+         * different codecs and different framing:
+         *
+         *   AudioMain  MainHighAudio/media, AAC, 48000 Hz, Stereo,
+         *              1024 samples/packet, 0x00800000, IL=48000 OL=57552
+         *   AudioAlt   AltAudio/default,  Opus, 48000 Hz, Mono,
+         *              960 samples/packet, 0x40000000, IL=3840 OL=3840
+         *
+         * Only the main stream is the AAC media path. The alternate is a
+         * separate, narrower Opus stream — it is not "the same PCM on a second
+         * port". Sending it the main stream's audioFormat/spf describes a
+         * stream the receiver never asked for.
+         */
+        val companion = companionFormat(format)
+        val companionSamplesPerPacket = companion.second
+        val companionFormatBits = companion.first
         val id = SecureRandom().nextLong().and(Long.MAX_VALUE)
         val local = runCatching {
             DatagramSocket(null).also {
@@ -1212,10 +1258,12 @@ class AirPlaySender(
         val descriptor = linkedMapOf<String, Any>(
             "type" to companionType,
             "audioType" to companionAudioType,
-            "audioFormat" to format.formatBits,
+            "audioFormat" to companionFormatBits,
             "streamConnectionID" to id,
-            "audioLatencyMs" to PCM_LATENCY_MS,
-            "spf" to format.samplesPerPacket,
+            // JBL = 80 ms for AltAudio in the iPhone capture, against 1000 ms
+            // for MainHighAudio. The two streams are scheduled independently.
+            "audioLatencyMs" to COMPANION_LATENCY_MS,
+            "spf" to companionSamplesPerPacket,
             "sr" to format.sampleRate,
             "ct" to 1,
             "input" to false,
@@ -1532,6 +1580,18 @@ class AirPlaySender(
             val timestamp = aacTimestampClock?.next(chunk.ptsUs)
                 ?: format.rtpTimestamp(chunk.ptsUs)
             sendAudioPacket(key, format, chunk.bytes, timestamp)
+            /*
+             * Keep the companion fed on the AAC path too.
+             *
+             * The iPhone's AltAudio stream carries its own Opus encoding of the
+             * same audio at the same instant. This sender has no Opus encoder,
+             * so it writes the AAC access unit on both streams rather than
+             * leaving the companion silent: a stream that is declared in SETUP
+             * and then never receives a packet is worse than one carrying a
+             * codec the receiver may not decode, because the car's audio
+             * watchdog is counting packets, not decoding them.
+             */
+            sendCompanionAudio(chunk.bytes, timestamp)
         }
     }
 
@@ -1965,6 +2025,17 @@ class AirPlaySender(
          * They are diagnostics only: this receiver accepted no corresponding
          * SETUP keys, so serializing guessed fields would risk rejection.
          */
+        /**
+         * Companion (AltAudio / type 101) shape, from the iPhone sysdiagnose:
+         * `AltAudio/default, Opus, 48000 Hz, Mono, 960 samples/packet,
+         * 0x40000000, IL = 3840 samples, OL = 3840 samples`.
+         */
+        private const val COMPANION_OPUS_FORMAT = 0x40000000L
+        private const val COMPANION_OPUS_SAMPLES_PER_PACKET = 960
+
+        /** AltAudio schedules 80 ms ahead; MainHighAudio schedules 1000 ms. */
+        private const val COMPANION_LATENCY_MS = 80
+
         private const val AAC_INPUT_BUFFER_SAMPLES = 48_000
         private const val AAC_OUTPUT_BUFFER_SAMPLES = 57_552
         private const val PCM_INPUT_BUFFER_SAMPLES = 0
