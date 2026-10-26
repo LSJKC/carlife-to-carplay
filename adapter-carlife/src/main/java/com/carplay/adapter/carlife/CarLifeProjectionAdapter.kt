@@ -175,6 +175,26 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     }
 
     /**
+     * Starts CarLife's process without asking it to bind this app as host.
+     *
+     * CarLife's CarlifeConnectService only runs its bind path when the intent
+     * carries `bindPackageName`:
+     *
+     *     if (!intent.hasExtra("bindPackageName") || !intent.hasExtra("usb_type")) { log only }
+     *     else { if (getMixCastManager() == null) bindManufacturerService(intent); ... }
+     *
+     * Without those extras the process still comes up and raises its own
+     * "组件正在运行" notification, but it never takes the host binding away from
+     * Honor's launcher — which is the side that draws the car desktop. That is
+     * exactly the silent start the driver remembers: the status bar flickers
+     * once and the session connects by itself.
+     */
+    private fun wakeIntent() = Intent().apply {
+        setClassName(CARLIFE_PACKAGE, CARLIFE_CONNECT_SERVICE)
+        putExtra("usb_type", 0)
+    }
+
+    /**
      * Starts CarLife using the 1.2.7 startService-only lifecycle.
      *
      * This deliberately verifies the vendor component before calling
@@ -209,7 +229,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             }
             lastHostStartAt = now
         }
-        val intent = connectIntent(context)
+        val intent = wakeIntent()
         val resolved = runCatching {
             context.packageManager.resolveService(
                 intent,
@@ -224,43 +244,34 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             return false
         }
         /*
-         * Take the CarLife binding back from Honor's launcher.
+         * Bring CarLife's process up WITHOUT asking it to bind this app.
          *
-         * com.hihonor.auto starts CarLife with its own host identity
-         * (`bindPackageName=com.hihonor.auto`,
-         * `bindClassName=com.hihonor.auto.capability.CapabilityService`), and
          * CarLife binds to a host exactly once:
          *
          *     if (MixPhoneStrategy.getMixCastManager() == null) bindManufacturerService(intent);
          *
-         * Once the launcher has won that race, every startService from this app
-         * is accepted and ignored, and the callbacks that matter never arrive:
-         * carlife_encode_format (so CarLife keeps its own default resolution —
-         * the 1280x720 the driver sees), the media metadata for the cluster, and
-         * the hard-key listener. None of those is recoverable while the
-         * launcher holds the binding.
+         * and com.hihonor.auto is the host that matters: it renders the car
+         * desktop into the Surface CarLife offers, and CarLife only encodes the
+         * result. That division is what the driver wants; handing CarLife a
+         * `bindPackageName` of this app makes it bind THIS app instead, and a
+         * host with no UI to draw produces exactly the black frames seen in
+         * 1.2.66 and 1.2.71 (`prepareCast` arrives, then 480-byte frames).
          *
-         * Terminating the vendor process resets that state; the startService
-         * below then runs against a fresh process, which binds to us. Done once
-         * per session, before the TCP session starts, so an established picture
-         * is never disturbed.
-         */
-        /*
-         * Killing the vendor process does not take the binding back.
+         * Killing or retiring the vendor process to win the binding back is not
+         * an option either: com.hihonor.nearby marks the package stopped the
+         * moment it dies, and Android then refuses every start this app issues.
          *
-         * com.hihonor.nearby watches CarLife and marks the package stopped the
-         * moment it dies, after which Android refuses every start this app
-         * issues: the process never comes back, prepareCast never arrives, and
-         * the car shows a black screen. That is worse than losing the binding,
-         * so the process is left alone and the binding is taken only through
-         * the normal start path below.
+         * So the start below carries no bind extras. The process comes up, its
+         * seven TCP ports open, and whichever host already has a UI (Honor's
+         * launcher) keeps drawing the desktop. This app only reads the stream.
          */
         /*
          * CarLife 8.x is a vendor service and normally accepts a plain
          * startService even while this app is in the foreground. Android 11+
          * can reject that call when the request arrives from a background
          * Bluetooth receiver. Retry once through the foreground-service API so
-         * the failure is visible and the vendor process gets a chance to bind.
+         * the failure is visible and the vendor process gets a chance to come
+         * up.
          */
         val result = runCatching { context.startService(intent) }
             .recoverCatching { failure ->
@@ -284,7 +295,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             if (component != null) {
                 observer?.diagnostic(
                     "$reason：已请求启动 CarLife 服务（${component.flattenToShortString()}）；" +
-                        "等待 CarLife 自行绑定宿主",
+                        "未携带绑定参数，桌面继续由荣耀车联绘制",
                 )
             } else {
                 /*
@@ -305,8 +316,17 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                  * This session waits for it and only takes the H.264 stream.
                  */
                 observer?.diagnostic(
-                    "$reason：CarLife 未运行；请在荣耀车联里完成一次连接（它负责绘制桌面），" +
-                        "本应用只读取它的音视频流",
+                    "$reason：CarLife 未运行且被系统停用，尝试不带绑定参数静默启动",
+                )
+                val woken = runCatching { context.startService(wakeIntent()) }
+                if (woken.isSuccess) {
+                    observer?.diagnostic(
+                        "$reason：已静默启动 CarLife（不请求宿主绑定，桌面仍由荣耀车联绘制）",
+                    )
+                    return true
+                }
+                observer?.diagnostic(
+                    "$reason：静默启动被拒绝；请在荣耀车联里完成一次连接",
                 )
                 return false
             }
