@@ -35,28 +35,25 @@ class BluetoothArrivalReceiver : BroadcastReceiver() {
             ) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) return
         val settings = CastSettings(context)
-        if (!settings.autoConnect) return
-        val peer = settings.peerAddress ?: return
-        if (!device.address.equals(peer, ignoreCase = true)) return
+        val knownCar = device.address.equals(settings.peerAddress, ignoreCase = true) ||
+            settings.hasConnected(device.address)
+        if (!knownCar) return
         if (device.bondState != BluetoothDevice.BOND_BONDED) return
-
-        // Only a car that has already shown a picture can be started from here.
-        //
-        // The first connection to any car is granted inside Honor's Car Connect
-        // flow, and those activities are exported=false, so a background
-        // receiver cannot reproduce it. Starting anyway would burn a full
-        // handshake and leave the driver with a failure notification instead of
-        // the one page they actually need; the foreground path handles that case
-        // and tells them where to go.
-        if (!settings.hasConnected(peer)) {
-            CastLog.event("INFO", "车机蓝牙已连接，但这台车还没有成功记录，等待手动完成首次连接")
-            return
-        }
 
         // CarLife renders and encodes its own car UI, so it needs nothing from
         // the user. Mirroring would need a capture grant that only an activity
         // can request, and silently popping one over the car UI is wrong.
         val carLife = CastEngine.carLifeAvailable(context)
+        /*
+         * The two paths answer to different switches on purpose.
+         *
+         * CarLife follows `carLifeAutoSession`, the "CarLife 自动跟车" toggle;
+         * mirroring follows `autoConnect`, because it needs a fresh capture
+         * grant. `carLifeAutoSession` was defined, shown in settings and saved
+         * for a long time without any code reading it, so turning it on did
+         * nothing and the car only connected when the button was pressed.
+         */
+        if (!(if (carLife) settings.carLifeAutoSession else settings.autoConnect)) return
         if (!carLife) {
             CastLog.event("INFO", "车机蓝牙已连接，但屏幕镜像需要录屏授权，未自动开始")
             return

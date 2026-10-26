@@ -588,10 +588,17 @@ internal class CarLifeSession(
         val policy = snapshotedSafeAreaPolicy
         if (policy != null) {
             try {
-                val enabledField = policy.javaClass.getField("enabled")
-                val modeField = policy.javaClass.getField("mode")
-                val enabled = enabledField.get(policy) as? Boolean ?: false
-                val mode = modeField.get(policy)?.toString() ?: "OFF"
+                // Kotlin data-class `val`s compile to getter methods, not
+                // fields, so getField("enabled") always threw and the safe-area
+                // policy was silently ignored on every session.
+                val enabledField = policy.javaClass.methods.firstOrNull {
+                    it.name == "getEnabled" && it.parameterCount == 0
+                }
+                val modeField = policy.javaClass.methods.firstOrNull {
+                    it.name == "getMode" && it.parameterCount == 0
+                }
+                val enabled = enabledField?.invoke(policy) as? Boolean ?: false
+                val mode = modeField?.invoke(policy)?.toString() ?: "OFF"
                 useSafeAreaSource = enabled && mode != "OFF"
                 log("安全区策略已应用：enabled=$enabled, mode=$mode, useSafeAreaSource=$useSafeAreaSource")
             } catch (e: Exception) {

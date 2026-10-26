@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import com.carplay.adapter.PhoneProjectionAdapter
 import com.carplay.adapter.ProjectionGrant
+import com.carplay.adapter.carlife.CarLifeMediaSnapshot
 import com.carplay.adapter.carlife.CarLifeProjectionAdapter
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -104,19 +105,40 @@ class CastService : Service() {
         val carLife = CarLifeProjectionAdapter()
         val useCarLife = mode != SourceMode.MIRROR && carLife.isSupported(this)
         if (useCarLife) {
-            // Use only the GM canvas that this session actually negotiates.
-            // There is no independently negotiated outer panel when /info has no
-            // viewAreas, so never inject inferred iPhone physical-panel offsets.
-            carLife.panel = com.carplay.adapter.carlife.CarLifePanel(
+            // Fallback until AirPlay /info provides this session's full display
+            // and optional safeArea; AirPlayLink replaces the geometry before prepare().
+            val panel = com.carplay.adapter.carlife.CarLifePanel(
                 panelWidth = CarPanelGeometry.PANEL_WIDTH,
                 panelHeight = CarPanelGeometry.PANEL_HEIGHT,
                 safeX = CarPanelGeometry.SAFE_X,
                 safeY = CarPanelGeometry.SAFE_Y,
                 safeWidth = CarPanelGeometry.SAFE_WIDTH,
                 safeHeight = CarPanelGeometry.SAFE_HEIGHT,
-                drawUiOutsideSafeArea = false,
-                needAdapterScreen = false,
+                drawUiOutsideSafeArea = true,
+                needAdapterScreen = true,
             )
+            carLife.panel = panel
+            carLife.mediaSnapshotProvider = {
+                MediaSessionSnapshotStore.current?.let { snapshot ->
+                    CarLifeMediaSnapshot(
+                        title = snapshot.title,
+                        artist = snapshot.artist,
+                        album = snapshot.album,
+                        lyrics = snapshot.lyrics,
+                        durationMs = snapshot.durationMs,
+                        positionMs = snapshot.positionMs,
+                        playing = snapshot.state == 1,
+                        packageName = snapshot.packageName,
+                        artworkBytes = snapshot.artwork,
+                    )
+                }
+            }
+            // CarLife emits a surface-sized H.264 stream that is not the size the
+            // head unit negotiated, so it must be decoded, composited onto the
+            // panel and re-encoded. Without this processor the raw CarLife frames
+            // go straight to the car, which decodes nothing and asks for a key
+            // frame forever while the screen stays black.
+            carLife.videoProcessor = CarLifePanelCompositor(panel)
             return carLife
         }
         if (mode == SourceMode.CARLIFE) error("未找到手机自带的 CarLife 应用")
