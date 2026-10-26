@@ -183,6 +183,24 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * the TCP side to time out with no explanation.
      */
     private fun startCarLifeHost(context: Context, reason: String): Boolean {
+        /*
+         * If CarLife is already running, leave it alone.
+         *
+         * On this phone Honor's launcher (com.hihonor.auto) is what draws the
+         * car desktop: it becomes CarLife's host, renders its UI into the
+         * surface CarLife offers, and CarLife encodes the result. When the
+         * launcher is already driving that, starting CarLife ourselves only
+         * competes for the same binding — and whoever owns the binding owns the
+         * surface, so taking it means the picture goes black because this app
+         * has no car UI to draw into it.
+         *
+         * A running vendor process is therefore left untouched and the session
+         * takes CarLife's H.264 stream from its ports instead.
+         */
+        if (isCarLifeRunning()) {
+            observer?.diagnostic("$reason：CarLife 已在运行，直接取流，不再干预其宿主绑定")
+            return true
+        }
         synchronized(lifecycleLock) {
             val now = android.os.SystemClock.uptimeMillis()
             if (now - lastHostStartAt < HOST_START_DEBOUNCE_MS) {
