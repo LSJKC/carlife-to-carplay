@@ -269,10 +269,46 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                         "等待 CarLife 自行绑定宿主",
                 )
             } else {
-                observer?.diagnostic("$reason：CarLife 服务未返回组件，等待 TCP 会话验证")
+                /*
+                 * A null component means the package is in the "stopped" state.
+                 *
+                 * com.hihonor.nearby marks CarLife stopped whenever its own
+                 * car session ends, and Android then refuses every start a
+                 * third-party app issues: startService returns null, no port
+                 * opens, and the session dies with ECONNREFUSED on 7240. Only
+                 * a user-visible launch clears that state — which is exactly
+                 * what "open CarLife once by hand and it connects by itself
+                 * afterwards" is doing. That launch is the only thing this app
+                 * can do about it, so it does it here rather than failing the
+                 * whole session.
+                 */
+                observer?.diagnostic("$reason：CarLife 被系统停用，改为启动其主界面以解除限制")
+                wakeCarLifeActivity(context)
             }
         }
         return result.isSuccess
+    }
+
+    /**
+     * Starts CarLife's activity once, clearing the package's stopped state.
+     *
+     * Deliberately a single launch per start attempt: repeating it would fight
+     * Honor's launcher, which is what stopped the package in the first place.
+     */
+    private fun wakeCarLifeActivity(context: Context) {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            setClassName(CARLIFE_PACKAGE, CARLIFE_ACTIVITY)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+        }
+        if (context.packageManager.resolveActivity(intent, PackageManager.MATCH_ALL) == null) {
+            observer?.diagnostic("CarLife 主界面不可解析：${CARLIFE_PACKAGE}/$CARLIFE_ACTIVITY")
+            return
+        }
+        runCatching { context.startActivity(intent) }
+            .onSuccess { observer?.diagnostic("已启动 CarLife 主界面，等待其自行绑定宿主") }
+            .onFailure {
+                observer?.diagnostic("启动 CarLife 主界面失败：${it.javaClass.simpleName}: ${it.message}")
+            }
     }
 
     override fun setObserver(observer: ProjectionObserver) { this.observer = observer }
