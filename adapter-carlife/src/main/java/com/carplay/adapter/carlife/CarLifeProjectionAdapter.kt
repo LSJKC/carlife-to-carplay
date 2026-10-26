@@ -309,6 +309,25 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * explicitly asked for the UI again.
      */
     private fun requestCarLifeKeyFrame(retry: Boolean) {
+        /*
+         * Fast path: make the compositor's own encoder emit an IDR.
+         *
+         * The receiver asks for a key frame after every decoder rebuild and
+         * every screen handover. Rebuilding CarLife's encoder to satisfy that
+         * took 3.3 seconds on the measured session — the car had already
+         * dropped the picture and, in one capture, reset the connection before
+         * the new IDR existed. With a compositor in the path there is nothing
+         * to rebuild: the source stream is unchanged, only the output needs a
+         * sync frame, and that arrives within a frame or two.
+         */
+        val processor = videoProcessor
+        if (processor != null && processor.requestOutputKeyFrame()) {
+            synchronized(videoStateLock) { recoveryRound++ }
+            observer?.diagnostic(
+                "已请求合成器输出关键帧（不重建 CarLife 编码器），恢复轮次 #$recoveryRound",
+            )
+            return
+        }
         // Serialize the gate transition, assembler reset, and frame delivery.
         // Otherwise an old callback can observe the new in-flight gate and
         // release it before the rebuilt encoder's IDR arrives.

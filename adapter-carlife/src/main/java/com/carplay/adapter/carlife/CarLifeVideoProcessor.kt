@@ -25,6 +25,20 @@ interface CarLifeVideoProcessor {
 
     fun offerFrame(accessUnit: ByteArray, ptsUs: Long, keyFrame: Boolean)
 
+    /**
+     * Asks the output encoder for an IDR without touching the source.
+     *
+     * The receiver asks for a key frame after every decoder rebuild and every
+     * screen handover. The cheap answer is to make this encoder emit a sync
+     * frame, which lands in the next frame or two. The expensive answer —
+     * rebuilding CarLife's encoder — takes three seconds and drops the
+     * picture, and the receiver has usually given up by then.
+     *
+     * Returns false when the encoder is not running yet, so the caller can
+     * fall back to rebuilding the source.
+     */
+    fun requestOutputKeyFrame(): Boolean = false
+
     fun mapTouchToSource(panelX: Float, panelY: Float): Pair<Float, Float>?
 
     fun stop()

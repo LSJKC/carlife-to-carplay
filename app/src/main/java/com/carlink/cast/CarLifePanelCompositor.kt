@@ -218,6 +218,21 @@ internal class CarLifePanelCompositor(
         }
     }
 
+    /**
+     * Makes this encoder emit an IDR on the next rendered frame.
+     *
+     * A receiver that has just rebuilt its decoder needs a key frame, and this
+     * is the cheap way to give it one: no source rebuild, no three-second gap,
+     * no dropped picture. The output CONFIG is unchanged, so the sender can
+     * resend the same avcC ahead of the new IDR.
+     */
+    override fun requestOutputKeyFrame(): Boolean {
+        if (!running.get()) return false
+        if (encoder == null) return false
+        requestOutputSync = true
+        return true
+    }
+
     override fun offerFrame(accessUnit: ByteArray, ptsUs: Long, keyFrame: Boolean) {
         if (!running.get() || accessUnit.isEmpty()) return
         var dropped = 0L
