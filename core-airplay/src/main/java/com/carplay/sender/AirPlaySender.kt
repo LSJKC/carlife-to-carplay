@@ -845,43 +845,57 @@ class AirPlaySender(
     private fun setupAudio(wire: RtspWire, format: SenderAudioFormat, shared: ByteArray, address: InetAddress) {
         val id = SecureRandom().nextLong().and(Long.MAX_VALUE)
         val local = own(DatagramSocket(null)); bindDatagram(local); local.bind(InetSocketAddress(localAddress(),0))
-        // The primary AAC shape mirrors the Buick iPhone capture. The older
-        // expanded descriptor is retained as a fallback for firmware that
-        // accepted that shape first.
         /*
-         * One stream per SETUP, with every field the receiver checks.
+         * Two descriptor shapes, one stream per SETUP.
          *
-         * Verified against two independent working senders:
+         * Shape A is the iPhone's own request for MainHighAudio, recovered from
+         * the Buick sysdiagnose for this exact head unit. It carries exactly
+         * six keys and no others:
          *
-         *  - The iPhone's own request for MainHighAudio, recovered from the
-         *    Buick sysdiagnose, is a single-entry "streams" array carrying
-         *    controlPort, spf, audioFormat, supportsHighAccuracyTimestamps,
-         *    audioType and audioLatencyMs — one stream, not three.
-         *  - a-sender (github.com/sender/a-sender) sends the same
-         *    single-entry shape and additionally sets `type`, `input` and
-         *    `supportsRTPPacketRedundancy`. Its notes record that a receiver
-         *    treats an absent `input` as "this stream cannot be used" and
-         *    abandons the stream during audio init.
+         *     controlPort, spf, audioFormat,
+         *     supportsHighAccuracyTimestamps, audioType, audioLatencyMs
          *
-         * This build previously packed the main stream plus two hard-coded Opus
-         * placeholders (types 101 and 106) into one SETUP. The Buick unit
-         * answered that with only the 101 and 106 entries — the main stream was
-         * dropped — and the code then re-sent everything in a legacy shape that
-         * the car refused with 400.
+         * Shape B is what a-sender (github.com/sender/a-sender) sends to
+         * receivers that reject shape A: the stream is described completely
+         * with type, streamConnectionID, input and
+         * supportsRTPPacketRedundancy. Its notes record that a receiver may
+         * treat an absent `input` as "this stream cannot be used".
+         *
+         * The two are mutually exclusive, not additive. Adding shape B's extra
+         * keys on top of shape A describes a different stream than the one the
+         * iPhone brings up, and a strict receiver rejects the SETUP outright
+         * instead of ignoring what it does not know. Shape A is tried first
+         * because it is the only shape verified on this car; shape B is the
+         * fallback for firmware that wants the explicit form.
+         *
+         * Both are sent as a single-entry "streams" array. An earlier build
+         * packed the main stream plus two hard-coded Opus placeholders (types
+         * 101 and 106) into one SETUP; this car answered with only the 101 and
+         * 106 entries, dropping the main stream.
          */
         fun descriptor(streamType: Int, audioFormat: Long, legacy: Boolean, audioType: String = "media"): Map<String, Any> = linkedMapOf<String, Any>().apply {
-            put("type", streamType)
-            put("streamConnectionID", id)
-            put("audioFormat", audioFormat)
-            put("audioType", audioType)
-            put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
-            put("input", false)
-            put("supportsRTPPacketRedundancy", false)
-            put("supportsHighAccuracyTimestamps", true)
-            put("spf", format.samplesPerPacket)
-            put("ct", if (format.isPcm) 1 else 4)
-            put("sr", format.sampleRate)
-            if (!format.isPcm && !legacy) put("controlPort", local.localPort)
+            if (legacy) {
+                // Shape B — the explicit form.
+                put("type", streamType)
+                put("streamConnectionID", id)
+                put("audioFormat", audioFormat)
+                put("audioType", audioType)
+                put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
+                put("input", false)
+                put("supportsRTPPacketRedundancy", false)
+                put("supportsHighAccuracyTimestamps", true)
+                put("spf", format.samplesPerPacket)
+                put("ct", if (format.isPcm) 1 else 4)
+                put("sr", format.sampleRate)
+            } else {
+                // Shape A — exactly the keys the iPhone sends on this car.
+                put("controlPort", local.localPort)
+                put("spf", format.samplesPerPacket)
+                put("audioFormat", audioFormat)
+                put("supportsHighAccuracyTimestamps", true)
+                put("audioType", audioType)
+                put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
+            }
         }
 
         fun buildMultiStreamSetup(legacy: Boolean): List<Map<String, Any>> =
