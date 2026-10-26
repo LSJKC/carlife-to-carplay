@@ -623,14 +623,32 @@ internal class CarLifeSession(
          * picture (full canvas or inside the safe rectangle); it does not
          * decide how large the source is encoded.
          */
-        val sourceWidth = area.panelWidth
-        val sourceHeight = area.panelHeight
+        /*
+         * With a safe-area policy on, CarLife is asked to encode the safe
+         * rectangle itself.
+         *
+         * That is the only way to get a picture that is simultaneously the
+         * safe area's shape, unscaled and free of cropping: the compositor then
+         * places it 1:1 at the safe origin and paints wallpaper around it. Any
+         * other route distorts (stretching 3.79:1 into 2.96:1), crops (fitting
+         * the safe shape cuts the side rail) or blurs (enlarging a fitted
+         * frame).
+         *
+         * An earlier note here claimed the car rejects an encoder whose size
+         * differs from the canvas it declared. The capture it was based on
+         * actually shows the 400 landing on the audio fallback SETUP: the
+         * screen SETUP and RECORD had both returned 200 with a 1408x476
+         * encoder, so the size was never the objection. With the audio path
+         * fixed, this is the shape to use.
+         */
+        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
+        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
 
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
-                "CarLife 源=${sourceWidth}x$sourceHeight (画布)，" +
-                "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})，" +
-                "策略=${if (useSafeAreaSource) "启用" else "未启用"}",
+                "CarLife 源=${sourceWidth}x$sourceHeight " +
+                (if (useSafeAreaSource) "(安全区比例)" else "(全画布)") + "，" +
+                "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})",
         )
         return CarLifeProto.videoEncoderInfo(
             sourceWidth, sourceHeight, fps,
