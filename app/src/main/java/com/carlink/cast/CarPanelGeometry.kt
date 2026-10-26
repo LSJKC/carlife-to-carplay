@@ -161,28 +161,38 @@ object CarPanelGeometry {
         val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
             /*
-             * Fit the source into the viewport without changing its shape.
+             * Fill the viewport by growing into the panel's margins.
              *
-             * The canvas and the safe rectangle rarely share an aspect ratio:
-             * this car's panel is 1972x520 (3.79:1) while its safe rectangle is
-             * 1408x476 (2.96:1). Stretching the full frame into the rectangle
-             * squashes CarLife's UI vertically — the driver described it as
-             * 拉长 — so the frame is scaled to fit inside the rectangle and
-             * centred, and the leftover strip stays wallpaper.
+             * Source 1972x520 (3.79:1) into a 1408x476 (2.96:1) viewport:
+             * fitting inside keeps every control but only fills 371 of the 476
+             * rows — the driver sees an empty strip along the bottom. Stretching
+             * squashes the UI and cropping to the viewport's shape cuts the side
+             * rail off. Neither is acceptable.
+             *
+             * Growing to fill means scaling by the larger ratio: 476/520 gives
+             * 1804x476, which is wider than the viewport but still inside the
+             * 1972-pixel panel. The extra width lands in the panel's own side
+             * margins — the strips the car already treats as unsafe — so the
+             * picture fills the viewport vertically, keeps its shape, keeps
+             * every control, and only reaches under the car's edge overlays the
+             * way a real iPhone's picture does. Where that overflow would leave
+             * the panel it is clamped and the GL viewport clips it.
              */
-            val fitted = fitInside(
+            val filled = coverInside(
                 outerX = viewport.first,
                 outerY = viewport.second,
                 outerWidth = viewport.third,
                 outerHeight = viewport.fourth,
                 sourceWidth = sourceWidth,
                 sourceHeight = sourceHeight,
+                panelWidth = panel.panelWidth,
+                panelHeight = panel.panelHeight,
             )
             return VideoPlacement(
-                x = fitted.first,
-                y = fitted.second,
-                width = fitted.third,
-                height = fitted.fourth,
+                x = filled.first,
+                y = filled.second,
+                width = filled.third,
+                height = filled.fourth,
                 layout = if (sourceIsSafeArea && viewport ==
                     Quad(panel.safeX, panel.safeY, panel.safeWidth, panel.safeHeight)
                 ) {
@@ -245,34 +255,44 @@ object CarPanelGeometry {
     }
 
     /**
-     * Largest rectangle with the source's aspect ratio that fits in the outer
-     * rectangle, centred inside it.
+     * Largest rectangle with the source's aspect ratio that covers the outer
+     * rectangle, centred on it, clamped so it never leaves the panel.
      *
-     * Scaling a frame into a differently shaped rectangle distorts it; this is
-     * the letterbox that keeps CarLife's UI the shape it was drawn in.
+     * Unlike a plain "cover" this does not crop the source: the rectangle is
+     * allowed to be bigger than the outer one, and the panel bounds decide how
+     * far that is allowed to go.
      */
-    private fun fitInside(
+    private fun coverInside(
         outerX: Int,
         outerY: Int,
         outerWidth: Int,
         outerHeight: Int,
         sourceWidth: Int,
         sourceHeight: Int,
+        panelWidth: Int,
+        panelHeight: Int,
     ): Quad {
         if (outerWidth <= 0 || outerHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
             return Quad(outerX, outerY, outerWidth, outerHeight)
         }
-        val widthScale = outerWidth.toDouble() / sourceWidth
-        val heightScale = outerHeight.toDouble() / sourceHeight
-        val scale = minOf(widthScale, heightScale)
-        val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
-        val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
-        return Quad(
-            outerX + (outerWidth - width) / 2,
-            outerY + (outerHeight - height) / 2,
-            width,
-            height,
+        val scale = maxOf(
+            outerWidth.toDouble() / sourceWidth,
+            outerHeight.toDouble() / sourceHeight,
         )
+        var width = (sourceWidth * scale).toInt().coerceAtLeast(1)
+        var height = (sourceHeight * scale).toInt().coerceAtLeast(1)
+        // Never grow past the panel; a panel-sized frame is already the limit.
+        if (width > panelWidth) {
+            width = panelWidth
+            height = (sourceHeight.toDouble() * panelWidth / sourceWidth).toInt().coerceAtLeast(1)
+        }
+        if (height > panelHeight) {
+            height = panelHeight
+            width = (sourceWidth.toDouble() * panelHeight / sourceHeight).toInt().coerceAtLeast(1)
+        }
+        val x = (outerX + (outerWidth - width) / 2).coerceIn(0, (panelWidth - width).coerceAtLeast(0))
+        val y = (outerY + (outerHeight - height) / 2).coerceIn(0, (panelHeight - height).coerceAtLeast(0))
+        return Quad(x, y, width, height)
     }
 
     private data class Quad(
