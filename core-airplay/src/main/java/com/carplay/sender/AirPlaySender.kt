@@ -364,7 +364,12 @@ class AirPlaySender(
             "sourceVersion" to "320.17",
             "sessionUUID" to java.util.UUID.randomUUID().toString(),
             "timingPort" to timingPort,
-            "keepAliveLowPower" to true,
+            // The iPhone's own session uses the Standard keep-alive type while
+            // it is streaming — 2017 ms between datagrams — and only switches
+            // to LowPowerOnIdle (10 s) when idle. Asking for low power from the
+            // start tells the car to relax its watchdog while we are actively
+            // sending, which is the wrong side of that trade.
+            "keepAliveLowPower" to false,
             "features" to CONTROLLER_FEATURES,
         )), plistHeaders).body)
         val enabledFeatures = (setup["enabledFeatures"] as? List<*>)
@@ -853,9 +858,12 @@ class AirPlaySender(
                     udp.send(DatagramPacket(payload, payload.size, remote, port))
                     count++
                     if (count <= 2 || count % 60 == 0L) {
-                        events.diagnostic("AirPlay UDP keepAlive #$count → ${remote.hostAddress}:$port")
+                        events.diagnostic(
+                            "AirPlay UDP keepAlive #$count → ${remote.hostAddress}:$port" +
+                                "（间隔 ${AIRPLAY_KEEPALIVE_INTERVAL_MS}ms）",
+                        )
                     }
-                    Thread.sleep(5000)
+                    Thread.sleep(AIRPLAY_KEEPALIVE_INTERVAL_MS)
                 }
             } catch (_: InterruptedException) {
                 // Session close interrupts workers after closing owned sockets.
@@ -1696,6 +1704,11 @@ class AirPlaySender(
          */
         private const val AUDIO_PACKET_INTERVAL_NANOS = 5_000_000L
         private const val AUDIO_SYNC_INTERVAL_MS = 1_000L
+        /**
+         * UDP keep-alive spacing, matching the iPhone's Standard keep-alive
+         * controller, which the capture shows sending every 2017 ms.
+         */
+        private const val AIRPLAY_KEEPALIVE_INTERVAL_MS = 2_000L
         /** Sync packets that may fail in a row before the loop gives up. */
         private const val AUDIO_SYNC_MAX_FAILURES = 300
         private const val AUDIO_QUEUE_LIMIT = 24
