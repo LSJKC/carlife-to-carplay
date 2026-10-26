@@ -27,19 +27,44 @@ class VideoQueue(private val capacity: Int = 8, private val byteLimit: Int = 8 *
     private var epoch = 0L
     var dropped: Long = 0; private set
     init { require(capacity > 0 && byteLimit > 0) }
-    fun offer(frame: EncodedVideo): Boolean = synchronized(lock) {
-        if (closed) return false
+    /**
+     * What happened to a frame handed to [offer].
+     *
+     * The caller used to treat a `false` return as "the queue is full, ask the
+     * source to rebuild its encoder". That is wrong for the most common case:
+     * while the queue waits for a key frame every ordinary P frame is rejected,
+     * and ordinary streams are almost entirely P frames. Each of those
+     * triggered a rebuild, and each rebuild answered with a placeholder frame —
+     * the picture went black right after the first frame arrived.
+     */
+    enum class OfferResult {
+        /** Queued. */
+        ACCEPTED,
+        /** Rejected because the queue waits for a key frame; keep sending. */
+        AWAITING_KEY_FRAME,
+        /** Rejected because the queue is closed. */
+        CLOSED,
+    }
+
+    fun offer(frame: EncodedVideo): OfferResult = synchronized(lock) {
+        if (closed) return OfferResult.CLOSED
         require(frame.bytes.size in 1..byteLimit)
-        if (waitingForKeyFrame && !frame.keyFrame) { dropped++; return false }
+        if (waitingForKeyFrame && !frame.keyFrame) {
+            dropped++
+            return OfferResult.AWAITING_KEY_FRAME
+        }
         if (frames.size >= capacity || bytes + frame.bytes.size > byteLimit) {
             dropped += frames.size; frames.clear(); bytes = 0; waitingForKeyFrame = true
-            if (!frame.keyFrame) { dropped++; return false }
+            if (!frame.keyFrame) {
+                dropped++
+                return OfferResult.AWAITING_KEY_FRAME
+            }
         }
         waitingForKeyFrame = false
         frames.addLast(frame.copy(bytes = frame.bytes.copyOf(), epoch = epoch))
         bytes += frame.bytes.size
         lock.notifyAll()
-        true
+        OfferResult.ACCEPTED
     }
 
     /**

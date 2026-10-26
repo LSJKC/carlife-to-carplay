@@ -1133,6 +1133,28 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             observer?.diagnostic("已释放 CarLife，交还手机音频通道")
         }.onFailure { observer?.diagnostic("释放 CarLife 失败：${it.message}") }
         CarLifeBridge.resetForNewSession()
+        /*
+         * Also let go of Honor's launcher.
+         *
+         * CarLife is only a transport: Honor's launcher (com.hihonor.auto)
+         * holds the car session and keeps the phone-side connection alive
+         * after this app has stopped. Left running, it keeps drawing the car
+         * UI, keeps its notification up, and the next session starts against a
+         * launcher that still believes it is connected — which is what makes
+         * the following attempt fail until the driver disconnects by hand.
+         * Stopping its connect service is the closest this app can get to
+         * pressing 断开 in the car UI; the system restart policy decides
+         * whether the launcher keeps a foreground process.
+         */
+        runCatching {
+            val stopped = context.stopService(
+                Intent().setClassName(
+                    "com.hihonor.auto",
+                    "com.hihonor.auto.connect.ConnectService",
+                ),
+            )
+            observer?.diagnostic("停止荣耀车联连接服务：返回=$stopped")
+        }.onFailure { observer?.diagnostic("停止荣耀车联连接服务失败：${it.message}") }
         hostContext = null
         lifecycleContext = null
     }

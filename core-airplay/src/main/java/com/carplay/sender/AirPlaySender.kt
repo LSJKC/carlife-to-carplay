@@ -158,6 +158,14 @@ class AirPlaySender(
     private var commandIapAttempts = 0
     private var commandModes = false
     private var selectedAudio: SenderAudioFormat? = null
+
+    /**
+     * Audio streams the car listed in /info, as (type, audioType, output bits).
+     *
+     * Kept so setupAudio() can offer exactly the auxiliary streams this car
+     * declared, in the format it declared, instead of fixed Opus placeholders.
+     */
+    private var declaredAuxStreams: List<Triple<Int, String, Long>> = emptyList()
     @Volatile private var audioProfileStable = false
     @Volatile private var audioProfileSetupComplete = false
     private val iapLock = Any()
@@ -435,6 +443,15 @@ class AirPlaySender(
         }
         val speech = audioEntries.filter { it["audioType"] == "speechRecognition" }
         val duplex = speech.filter { ((it["audioInputFormats"] as? Number)?.toLong() ?: 0L) and 0x50L != 0L }
+        // Remember what this car actually offers as auxiliary audio, so the
+        // SETUP can ask for those streams with those formats only.
+        declaredAuxStreams = audioEntries.mapNotNull { entry ->
+            val type = (entry["type"] as? Number)?.toInt() ?: return@mapNotNull null
+            val bits = (entry["audioOutputFormats"] as? Number)?.toLong() ?: return@mapNotNull null
+            val audioType = entry["audioType"]?.toString() ?: return@mapNotNull null
+            if (bits == 0L) return@mapNotNull null
+            Triple(type, audioType, bits)
+        }
         events.diagnostic(
             when {
                 speech.isEmpty() -> "车机未声明 speechRecognition 项：麦克风上行不可能，无需再试"
@@ -895,24 +912,25 @@ class AirPlaySender(
             // Primary: format.streamType (usually 100 or 102, AAC)
             streamList.add(descriptor(format.streamType, format.formatBits, legacy, "media"))
 
-            // Secondary: Alt/Aux audio types (Opus-based for speechRecognition)
-            // These are placeholders to prevent car's 30-second stream timeout
-            if (format.streamType in setOf(100, 102)) {
-                // If main is AAC, also offer Opus alternatives
-                val opusFormat = 0x40000000L  // Opus 48kHz mono
-
-                if (format.streamType == 100) {
-                    // If 100 (main), offer 101 (alt) and 102 (aux)
-                    streamList.add(descriptor(101, opusFormat, legacy, "default"))
-                    streamList.add(descriptor(102, opusFormat, legacy, "speechRecognition"))
-                } else if (format.streamType == 102) {
-                    // If 102 (already aux), try to add 101 (alt)
-                    streamList.add(descriptor(101, opusFormat, legacy, "default"))
+            /*
+             * Auxiliary streams: only the ones this car listed, in the format
+             * it listed for them.
+             *
+             * These used to be fixed Opus placeholders (type 101 and 106 at
+             * 0x40000000) added for every car, on the theory that a single
+             * stream would time out after thirty seconds. The Buick capture has
+             * no such streams — the iPhone sends MainHighAudio alone — and the
+             * placeholders do not match what that unit advertises (0x40008000),
+             * so it answered the whole SETUP with 400. Offer an auxiliary
+             * stream only when /info named it and its format; a car that
+             * declares a stream gets exactly that stream.
+             */
+            declaredAuxStreams
+                .filter { (type, _, _) -> type != format.streamType && type in setOf(101, 106) }
+                .distinctBy { (type, _, _) -> type }
+                .forEach { (type, audioType, bits) ->
+                    streamList.add(descriptor(type, bits, legacy, audioType))
                 }
-
-                // Always try to include 106 (OOB Opus)
-                streamList.add(descriptor(106, opusFormat, legacy, "speechRecognition"))
-            }
 
             return streamList
         }
@@ -922,9 +940,22 @@ class AirPlaySender(
         // accepted audio and stayed silent. Without this line a working session
         // and a silent one produce identical logs.
         var usedLegacy = false
+        // Log the exact descriptors sent, and why the first attempt failed.
+        // Without this the only visible symptom is a bare "SETUP / → 400" with
+        // no way to tell which stream the car objected to or what it was told.
+        val primarySetup = buildMultiStreamSetup(false)
+        events.diagnostic(
+            "音频 SETUP 请求：${primarySetup.joinToString(" | ") { stream ->
+                "type=${stream["type"]} audioType=${stream["audioType"]} " +
+                    "fmt=0x${(stream["audioFormat"] as? Number)?.toLong()?.toString(16) ?: "-"} " +
+                    "spf=${stream["spf"] ?: "-"}"
+            }}",
+        )
         val accepted = runCatching {
-            streams(wire.request("SETUP", "/", encode(mapOf("streams" to buildMultiStreamSetup(false))), plistHeaders).body)
+            streams(wire.request("SETUP", "/", encode(mapOf("streams" to primarySetup)), plistHeaders).body)
                 .firstOrNull { number(it["type"]) == format.streamType }
+        }.onFailure {
+            events.diagnostic("音频 SETUP 参考字段集被拒：${it.message}")
         }.getOrNull() ?: run {
             usedLegacy = true
             events.diagnostic("音频 SETUP 未接受参考字段集，回退为含 controlPort 的旧字段集")
@@ -1073,7 +1104,12 @@ class AirPlaySender(
         }
         if (recovered) events.diagnostic("恢复轮次已接收新 IDR，等待视频线程先发 CONFIG 再发首帧")
         val before = queue.dropped
-        if (!queue.offer(EncodedVideo(bytes, ptsUs, keyFrame))) requestKeyFrame()
+        // Only a closed queue means the sender is gone. A P frame rejected
+        // while the queue waits for a key frame is ordinary and must not
+        // restart the source's encoder: see VideoQueue.OfferResult.
+        if (queue.offer(EncodedVideo(bytes, ptsUs, keyFrame)) == VideoQueue.OfferResult.CLOSED) {
+            requestKeyFrame()
+        }
         val dropped = queue.dropped - before
         if (dropped > 0) events.dropped(dropped)
     }

@@ -27,15 +27,30 @@ internal data class CarLifeEncoderFormat(
     val resolutionAccurate: Boolean?,
 ) {
     fun mediaFormatOverrides(): Map<String, Any> = buildMap {
-        // Do not put width/height/frame-rate here. CarLife's source surface is
-        // not E5's resizeable virtual display; changing codec dimensions in
-        // this callback can clip its UI or desynchronise touch coordinates.
+        /*
+         * Report the geometry CarLife should encode at.
+         *
+         * CarLife asks for these on carlife_encode_format and, when the answer
+         * is missing, falls back to the resolution baked into its own settings
+         * screen — a low default that looks soft on a wide panel. The car's
+         * panel is already known from the AirPlay display negotiation, so
+         * answer with it and CarLife renders natively instead of upscaling a
+         * small frame. The coded dimensions still come from
+         * VIDEO_ENCODER_INIT; these keys describe the layout CarLife draws.
+         */
         put("save_area_width", safeWidth)
         put("save_area_height", safeHeight)
         put("save_area_x", safeX)
         put("save_area_y", safeY)
         put("need_adapter_screen", if (needAdapterScreen) 1 else 0)
         put("draw_ui_outside_safe_area", if (drawUiOutsideSafeArea) 1 else 0)
+        put("panel_width", panelWidth)
+        put("panel_height", panelHeight)
+        put("real_width", panelWidth)
+        put("real_height", panelHeight)
+        put("default_width", panelWidth)
+        put("default_height", panelHeight)
+        put("res_accuracy", true)
     }
 
     companion object {

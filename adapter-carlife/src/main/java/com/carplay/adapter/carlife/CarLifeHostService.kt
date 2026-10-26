@@ -479,7 +479,9 @@ object CarLifeBridge {
             log(
                 "CarLife 编码安全区回调：面板 ${format.panelWidth}x${format.panelHeight}，" +
                     "安全区 ${format.safeWidth}x${format.safeHeight}@(${format.safeX},${format.safeY})；" +
-                    "保持 CarLife 编码宽高/FPS不变",
+                    "CarLife 声明 real=${format.realWidth}x${format.realHeight}，" +
+                    "default=${format.defaultWidth}x${format.defaultHeight}，" +
+                    "精度=${format.resolutionAccurate}；回报分辨率 ${format.panelWidth}x${format.panelHeight}",
             )
             return Bundle().apply {
                 overrides.forEach { (key, value) ->
