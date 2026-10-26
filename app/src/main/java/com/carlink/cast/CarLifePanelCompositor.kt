@@ -231,8 +231,25 @@ internal class CarLifePanelCompositor(
      */
     override fun requestOutputKeyFrame(): Boolean {
         if (!running.get()) return false
+        val config = outputAvcC ?: return false
         if (encoder == null) return false
         requestOutputSync = true
+        // Ask immediately as well: the flag alone is only consumed when a
+        // decoded frame arrives, and a source that has gone quiet would leave
+        // the receiver waiting for a key frame it never gets.
+        requestEncoderSyncFrame()
+        /*
+         * Re-announce the CONFIG with the sync frame.
+         *
+         * The sender's recovery gate only releases a key frame whose CONFIG
+         * generation is at least the one it asked for, and it asks for
+         * generation+1. Rebuilding the source encoder satisfied that by
+         * producing a fresh CONFIG; asking this encoder for a sync frame does
+         * not, so without this line the gate stays shut and every frame is
+         * discarded — 1265 frames produced and 9 delivered, which is exactly
+         * what the "0.1 fps, no picture" session shows.
+         */
+        outputConfig?.invoke(config.copyOf())
         return true
     }
 

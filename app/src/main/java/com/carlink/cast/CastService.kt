@@ -35,6 +35,18 @@ class CastService : Service() {
     }
     @Volatile private var engine: CastEngine? = null
     private val stopping = AtomicBoolean()
+
+    /**
+     * True once onDestroy has run.
+     *
+     * The executors below are shut down there, and a session that ends by the
+     * service being destroyed still reaches finishSession() from the worker
+     * thread. Submitting to a terminated pool throws
+     * RejectedExecutionException and kills the app — observed in a real crash
+     * log (`... rejected from ThreadPoolExecutor[Terminated]`) right after a
+     * disconnect.
+     */
+    @Volatile private var destroyed = false
     /** Set once this session has recorded a real success for this car. */
     @Volatile private var connectedRecorded = false
 
@@ -85,17 +97,26 @@ class CastService : Service() {
             CastLog.event("INFO", message)
         }
         engine = session
-        worker.execute {
-            session.run { failure ->
-                if (!stopping.get()) {
-                    CastLog.stop(failure.message ?: failure.javaClass.simpleName)
-                    notifyFailure(failure)
+        runCatching {
+            worker.execute {
+                session.run { failure ->
+                    if (!stopping.get()) {
+                        CastLog.stop(failure.message ?: failure.javaClass.simpleName)
+                        notifyFailure(failure)
+                    }
                 }
+                // run() returns once the AirPlay worker is started; the session's
+                // real lifetime is tracked by the engine.
+                awaitSessionEnd(session)
+                finishSession(startId)
             }
-            // run() returns once the AirPlay worker is started; the session's
-            // real lifetime is tracked by the engine.
-            awaitSessionEnd(session)
-            finishSession(startId)
+        }.onFailure { failure ->
+            CastLog.event("ERROR", "投屏工作线程已关闭，会话无法启动：${failure.message}")
+            runCatching { session.close() }
+            if (engine === session) engine = null
+            runCatching { releaseSessionLocks() }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
         }
         return START_NOT_STICKY
     }
@@ -221,12 +242,28 @@ class CastService : Service() {
     }
 
     private fun finishSession(startId: Int) {
-        cleanup.execute {
-            engine?.close()
+        if (destroyed) {
+            runCatching { engine?.close() }
             engine = null
-            releaseSessionLocks()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf(startId)
+            runCatching { releaseSessionLocks() }
+            return
+        }
+        runCatching {
+            cleanup.execute {
+                engine?.close()
+                engine = null
+                releaseSessionLocks()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf(startId)
+            }
+        }.onFailure { failure ->
+            // The pool was shut down between the flag check and the submit.
+            // Finish synchronously: leaving the engine open here would keep the
+            // CarLife host and the CPU lock held with no session behind them.
+            CastLog.event("WARN", "会话清理线程已关闭，改为同步收尾：${failure.message}")
+            runCatching { engine?.close() }
+            engine = null
+            runCatching { releaseSessionLocks() }
         }
     }
 
@@ -277,16 +314,23 @@ class CastService : Service() {
     private fun stopSession(reason: String) {
         if (!stopping.compareAndSet(false, true)) return
         CastLog.stop(reason)
-        cleanup.execute {
-            engine?.close()
+        runCatching {
+            cleanup.execute {
+                engine?.close()
+                engine = null
+                releaseSessionLocks()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }.onFailure {
+            runCatching { engine?.close() }
             engine = null
-            releaseSessionLocks()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            runCatching { releaseSessionLocks() }
         }
     }
 
     override fun onDestroy() {
+        destroyed = true
         runCatching { engine?.close() }
         engine = null
         // Every way a session can end goes through here or finishSession(); a
