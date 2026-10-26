@@ -227,10 +227,16 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
          * per session, before the TCP session starts, so an established picture
          * is never disturbed.
          */
-        if (!hostDetached) {
-            hostDetached = true
-            detachForeignHost(context, reason)
-        }
+        /*
+         * Killing the vendor process does not take the binding back.
+         *
+         * com.hihonor.nearby watches CarLife and marks the package stopped the
+         * moment it dies, after which Android refuses every start this app
+         * issues: the process never comes back, prepareCast never arrives, and
+         * the car shows a black screen. That is worse than losing the binding,
+         * so the process is left alone and the binding is taken only through
+         * the normal start path below.
+         */
         /*
          * CarLife 8.x is a vendor service and normally accepts a plain
          * startService even while this app is in the foreground. Android 11+
