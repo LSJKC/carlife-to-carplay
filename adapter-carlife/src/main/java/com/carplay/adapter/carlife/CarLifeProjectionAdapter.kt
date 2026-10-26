@@ -68,6 +68,9 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     @Volatile private var hostRetryThread: Thread? = null
     private var hostRetryGeneration = 0L
     private var lastHostStartAt = 0L
+
+    /** True once this session has taken the CarLife binding back from Honor. */
+    private var hostDetached = false
     private var lastRetiredAt = 0L
 
     /**
@@ -201,6 +204,32 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                     "请确认 Honor CarLife+ 组件完整安装且未被系统停用",
             )
             return false
+        }
+        /*
+         * Take the CarLife binding back from Honor's launcher.
+         *
+         * com.hihonor.auto starts CarLife with its own host identity
+         * (`bindPackageName=com.hihonor.auto`,
+         * `bindClassName=com.hihonor.auto.capability.CapabilityService`), and
+         * CarLife binds to a host exactly once:
+         *
+         *     if (MixPhoneStrategy.getMixCastManager() == null) bindManufacturerService(intent);
+         *
+         * Once the launcher has won that race, every startService from this app
+         * is accepted and ignored, and the callbacks that matter never arrive:
+         * carlife_encode_format (so CarLife keeps its own default resolution —
+         * the 1280x720 the driver sees), the media metadata for the cluster, and
+         * the hard-key listener. None of those is recoverable while the
+         * launcher holds the binding.
+         *
+         * Terminating the vendor process resets that state; the startService
+         * below then runs against a fresh process, which binds to us. Done once
+         * per session, before the TCP session starts, so an established picture
+         * is never disturbed.
+         */
+        if (!hostDetached) {
+            hostDetached = true
+            detachForeignHost(context, reason)
         }
         /*
          * CarLife 8.x is a vendor service and normally accepts a plain
@@ -352,6 +381,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
         // "车机未授权，即将退出". Derive a stable id for this installation.
         val hostId = stableHostId(context)
         preparedHostId = hostId
+        hostDetached = false
         CarLifeBridge.deviceId = hostId
         CarLifeBridge.deviceVCode = android.provider.Settings.Secure.getString(
             context.contentResolver, android.provider.Settings.Secure.ANDROID_ID
@@ -1116,6 +1146,47 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * the background-process reclaim is the fallback that actually takes the
      * audio route back when CarLife ignores it.
      */
+    /**
+     * Ends whatever host CarLife is currently bound to, so the startService
+     * that follows runs against a fresh process that binds to this app.
+     *
+     * Stopping the connect service alone is not enough: CarLife clears its host
+     * binding only when the bound service dies, not when its own service is
+     * stopped. Killing the vendor process is what resets it, and the process
+     * has to be out of the foreground first for killBackgroundProcesses to act,
+     * hence the stopService before it.
+     */
+    /**
+     * Whether CarLife already has its command port open.
+     *
+     * Reading another app's process table is denied on Android 10+, but a port
+     * that accepts a connection proves the vendor process is alive. The probe
+     * connection is closed immediately.
+     */
+    private fun isCarLifeRunning(): Boolean = runCatching {
+        java.net.Socket().use {
+            it.connect(
+                java.net.InetSocketAddress("127.0.0.1", CarLifeProtocol.PORT_CMD),
+                CARLIFE_PROBE_TIMEOUT_MS,
+            )
+            it.setSoLinger(true, 0)
+        }
+        true
+    }.getOrElse { false }
+
+    private fun detachForeignHost(context: Context, reason: String) {
+        if (!isCarLifeRunning()) return
+        observer?.diagnostic("$reason：CarLife 已被其他宿主绑定，重置其进程以重新绑定")
+        runCatching { context.stopService(connectIntent(context)) }
+        runCatching {
+            context.getSystemService(android.app.ActivityManager::class.java)
+                ?.killBackgroundProcesses(CARLIFE_PACKAGE)
+        }
+        // Give the vendor process a moment to actually go away; startService
+        // on a dying process is what makes the v2 bind silently fail.
+        Thread.sleep(HOST_DETACH_SETTLE_MS)
+    }
+
     private fun releaseCarLife() {
         val context = hostContext ?: lifecycleContext ?: return
         cancelHostRetry()
@@ -1339,6 +1410,12 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
         const val HOST_NOTIFY_INTERVAL_MS = 3_200L
         const val HOST_START_DEBOUNCE_MS = 2_500L
         const val HOST_RETIRE_SETTLE_MS = 350L
+
+        /** How long to let the vendor process die before starting it again. */
+        private const val HOST_DETACH_SETTLE_MS = 900L
+
+        /** How long a loopback probe waits before deciding CarLife is not up. */
+        private const val CARLIFE_PROBE_TIMEOUT_MS = 400
         const val HOST_RETIRE_COOLDOWN_MS = 15_000L
 
     }

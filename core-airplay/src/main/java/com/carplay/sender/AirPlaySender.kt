@@ -163,6 +163,14 @@ class AirPlaySender(
     @Volatile private var audioProfileSetupComplete = false
     private val iapLock = Any()
     private var openingIap = false
+    /**
+     * True when the head unit listed `iAPChannel` among the features it enabled.
+     *
+     * It decides whether the Wi-Fi command channel is a usable iAP2 transport.
+     * A car without it accepts link markers there but never identifies the
+     * link, and resets the session about twenty seconds in.
+     */
+    private var carEnablesIapChannel = false
     private val earlyIap = ArrayDeque<ByteArray>()
     private var earlyIapBytes = 0
     /** Commands already reported once, so a per-second retry cannot flood the log. */
@@ -355,6 +363,19 @@ class AirPlaySender(
         val enabledFeatures = (setup["enabledFeatures"] as? List<*>)
             ?.map { it.toString() }
             .orEmpty()
+        /*
+         * Whether this head unit runs iAP2 on the Wi-Fi command channel.
+         *
+         * The Buick advertises exactly altScreen, viewAreas and enhancedSiri —
+         * the same three the iPhone negotiates in its own capture — and has no
+         * iAPChannel. On such a car the command channel carries iAP2 link
+         * markers but never answers an identification request: the link reaches
+         * READY, every StartIdentification (0x1d00) goes unanswered, the retry
+         * fires every three seconds, and about twenty seconds in the car resets
+         * the control connection. Control has to stay on the already
+         * authenticated Bluetooth link instead.
+         */
+        carEnablesIapChannel = enabledFeatures.any { it.equals("iAPChannel", ignoreCase = true) }
         events.diagnostic(
             "AirPlay 能力协商：车机启用=${enabledFeatures.ifEmpty { listOf("未返回") }}；" +
                 "本机提议=${CONTROLLER_FEATURES.joinToString(",")}",
@@ -535,10 +556,24 @@ class AirPlaySender(
             )))), plistHeaders).body)
         val transport = synchronized(iapLock) {
             val selectedTransport = SenderNegotiation.control(iapReply)
-            if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH && earlyIap.isNotEmpty()) {
+            if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH &&
+                earlyIap.isNotEmpty() &&
+                carEnablesIapChannel
+            ) {
                 events.diagnostic("已收到车机实际发起的 iAP 命令；建立命令控制通道并执行独立验证")
                 SenderControlTransport(SenderControlKind.WIFI_COMMAND)
-            } else selectedTransport.also { if (it.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) openingIap = false }
+            } else {
+                if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH && earlyIap.isNotEmpty()) {
+                    // The car sent link markers on the command channel but did
+                    // not advertise iAPChannel, so it will not identify a link
+                    // there. Keep control on Bluetooth and only acknowledge the
+                    // markers.
+                    events.diagnostic(
+                        "车机未声明 iAPChannel：命令通道仅应答不建链路，控制通道沿用已认证蓝牙",
+                    )
+                }
+                selectedTransport.also { if (it.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) openingIap = false }
+            }
         }
         events.diagnostic("type 130 协商结果：${transport.kind}，回复字段数=${iapReply.size}")
         commandModes = transport.kind != SenderControlKind.WIFI_DATASTREAM
@@ -639,6 +674,27 @@ class AirPlaySender(
         events.startDisplay(selected)
         if (enableAudio) {
             setupAudio(wire, checkNotNull(selectedAudio), shared, socket.inetAddress)
+            /*
+             * Claim the audio resource now that the stream exists.
+             *
+             * The initial snapshot is declared before the screen SETUP, when the
+             * car has no audio stream to hand over yet; it keeps audio for
+             * itself. Until this app owns resource 2 every captured chunk is
+             * dropped at enqueue, which is what "sound came out once and then
+             * nothing" looks like from the driver's seat. Declaring again here
+             * puts the claim in front of a car that can actually answer it.
+             */
+            runCatching {
+                synchronized(audioQueueLock) {
+                    if (!modes.ownsAudio()) {
+                        setAudioOwnership(true)
+                        events.diagnostic("音频流已建立，重新声明音频资源由手机播放")
+                    }
+                }
+                wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
+            }.onFailure {
+                events.diagnostic("音频所有权声明失败：${it.message}")
+            }
             audioProfileSetupComplete = true
             audioProfileStable = false
             /*
@@ -1022,22 +1078,36 @@ class AirPlaySender(
         audioSyncSequence = 0
         val worker = Thread({
             var first = true
-            try {
-                while (!closed.get() && !socket.isClosed) {
-                    val current = lastAudioTimestamp
-                    val next = nextAudioTimestamp
-                    if (current == null || next == null) {
-                        Thread.sleep(25L)
-                        continue
-                    }
-                    val packet = AudioSyncPacket.build(
-                        sequence = audioSyncSequence,
-                        currentTimestamp = current,
-                        nextTimestamp = next,
-                        ntp = ntpBytes(clock.syncedNtp()),
-                        first = first,
-                    )
-                    socket.send(DatagramPacket(packet, packet.size))
+            var consecutiveFailures = 0
+            /*
+             * A refused sync packet is not a dead session.
+             *
+             * The car answers the audio SETUP with a controlPort before it is
+             * listening on it, so the first packet or two draw an ICMP port
+             * unreachable, which connected UDP reports as ECONNREFUSED. The
+             * loop below used to treat that as fatal and exit, leaving the
+             * session with no RTP↔NTP anchor at all — the car then guessed
+             * scheduling from arrival times and the audio never settled.
+             * Keep sending; only give up after a long run of failures or when
+             * the session itself is closing.
+             */
+            while (!closed.get() && !socket.isClosed) {
+                val current = lastAudioTimestamp
+                val next = nextAudioTimestamp
+                if (current == null || next == null) {
+                    runCatching { Thread.sleep(25L) }.onFailure { return@Thread }
+                    continue
+                }
+                val packet = AudioSyncPacket.build(
+                    sequence = audioSyncSequence,
+                    currentTimestamp = current,
+                    nextTimestamp = next,
+                    ntp = ntpBytes(clock.syncedNtp()),
+                    first = first,
+                )
+                val sent = runCatching { socket.send(DatagramPacket(packet, packet.size)) }
+                if (sent.isSuccess) {
+                    consecutiveFailures = 0
                     audioSyncSequence = (audioSyncSequence + 1) and 0xffff
                     if (first) {
                         first = false
@@ -1046,12 +1116,20 @@ class AirPlaySender(
                                 "ts=$current→$next rate=${format.sampleRate}Hz",
                         )
                     }
-                    Thread.sleep(AUDIO_SYNC_INTERVAL_MS)
+                } else {
+                    consecutiveFailures++
+                    val reason = sent.exceptionOrNull()?.message ?: "未知错误"
+                    if (consecutiveFailures == 1 || consecutiveFailures % 100 == 0) {
+                        events.diagnostic(
+                            "音频同步包暂时发不出去（第 $consecutiveFailures 次）：$reason；继续重试",
+                        )
+                    }
+                    if (consecutiveFailures >= AUDIO_SYNC_MAX_FAILURES) {
+                        events.diagnostic("音频同步包连续失败 $consecutiveFailures 次，停止同步线程")
+                        return@Thread
+                    }
                 }
-            } catch (_: InterruptedException) {
-                // Session close interrupts the worker after closing the socket.
-            } catch (error: Exception) {
-                if (!closed.get()) events.diagnostic("音频 RTP↔NTP 同步停止：${error.message}")
+                runCatching { Thread.sleep(AUDIO_SYNC_INTERVAL_MS) }.onFailure { return@Thread }
             }
         }, "carplay-audio-sync").apply { isDaemon = true }
         audioSyncThread = worker
@@ -1323,15 +1401,28 @@ class AirPlaySender(
             "iAPSendMessage" -> {
                 val data = IapCommandData.payload(command)
                 if (data == null) return ControlReply(200)
-                // The car starts the link itself on this channel: the first
-                // payload is its six-byte detection marker. Attach a real iAP2
-                // link so the marker is answered; acknowledging it without a
-                // link left the car retrying for thirty seconds and then
-                // dropping the session every single time.
-                val forwarded = receiveIap(data) || ensureCommandIap()?.offer(data) == true
+                /*
+                 * Only run an iAP2 link here when the car enabled iAPChannel.
+                 *
+                 * This head unit sends the six-byte link marker on the command
+                 * channel even though it never enables iAPChannel: its own
+                 * iPhone capture records `iAPChannel = 0` and proposes a
+                 * feature list without it, and the live connection negotiates
+                 * exactly altScreen/viewAreas/enhancedSiri. Opening a link
+                 * anyway reaches READY, answers nothing, retries
+                 * StartIdentification every three seconds, and the car resets
+                 * the control connection about twenty seconds later. Control
+                 * stays on the authenticated Bluetooth link; the markers are
+                 * acknowledged with 200 and nothing else.
+                 */
+                val forwarded = receiveIap(data) ||
+                    (carEnablesIapChannel && ensureCommandIap()?.offer(data) == true)
                 val description = describeIapMessage(data)
                 if (!forwarded && reportedCommands.add("iAP:$description")) {
-                    events.diagnostic("iAP 控制数据未被链路接收：字节=${data.size}（$description）")
+                    events.diagnostic(
+                        if (carEnablesIapChannel) "iAP 控制数据未被链路接收：字节=${data.size}（$description）"
+                        else "iAP 控制数据已收到（车机未启用 iAPChannel，仅应答）：字节=${data.size}（$description）",
+                    )
                 } else if (reportedCommands.add("first:$description")) {
                     events.diagnostic("收到车机 iAP2：字节=${data.size}（$description），已交给链路")
                 }
@@ -1345,7 +1436,22 @@ class AirPlaySender(
                 val change = synchronized(audioQueueLock) {
                     val ownedBefore = modes.ownsAudio()
                     val result = modes.change(command)
-                    if (ownedBefore != modes.ownsAudio()) invalidateAudioGenerationLocked()
+                    val ownedAfter = modes.ownsAudio()
+                    if (ownedBefore != ownedAfter) {
+                        invalidateAudioGenerationLocked()
+                        /*
+                         * Losing audio must be visible.
+                         *
+                         * While the car owns the audio resource every captured
+                         * chunk is dropped at enqueue without a trace, so a
+                         * session could play a single packet and then go
+                         * silent with nothing in the journal to explain it.
+                         */
+                        events.diagnostic(
+                            if (ownedAfter) "车机把音频资源交还手机，恢复发送"
+                            else "车机收回了音频资源，暂停发送音频",
+                        )
+                    }
                     result
                 }
                 val response = change.reply
@@ -1530,6 +1636,8 @@ class AirPlaySender(
          */
         private const val AUDIO_PACKET_INTERVAL_NANOS = 5_000_000L
         private const val AUDIO_SYNC_INTERVAL_MS = 1_000L
+        /** Sync packets that may fail in a row before the loop gives up. */
+        private const val AUDIO_SYNC_MAX_FAILURES = 300
         private const val AUDIO_QUEUE_LIMIT = 24
 
         /**
