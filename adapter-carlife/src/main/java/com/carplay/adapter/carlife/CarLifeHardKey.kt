@@ -24,14 +24,28 @@ internal object CarLifeHardKey {
     /** End the call. */
     const val HANG_UP = 3
 
+    /** Home screen (CarLife's own 1, distinct from BACK=14). */
+    const val HOME = 1
+
     /** Knob turned clockwise. */
     const val KNOB_CLOCKWISE = 6
 
     /** Knob turned anticlockwise. */
     const val KNOB_ANTICLOCKWISE = 7
 
+    const val SETTINGS = 8
+    const val MEDIA = 9
+    const val RADIO = 10
+    const val NAVI = 11
+    const val SOURCE = 12
+    const val MODE = 13
+
     /** Back out of the current screen. */
     const val BACK = 14
+
+    const val VOLUME_SUB = 17
+    const val VOLUME_ADD = 18
+    const val MUTE = 19
 
     /** Confirm the focused item. */
     const val OK = 20
@@ -50,8 +64,27 @@ internal object CarLifeHardKey {
     /** Start and stop media playback. */
     const val PLAY = 31
     const val STOP = 32
-    const val NEXT = 29
-    const val PREVIOUS = 30
+
+    /*
+     * Track skipping is NOT 29/30.
+     *
+     * `CommonParams` says 29 = KEYCODE_TEL and 30 = KEYCODE_MAIN, and
+     * `CarlifeConnectInitUtils.lambda$initHardKeyCodeModule$1` confirms it:
+     * 29 launches the phone screen, 30 launches the home screen. Sending a
+     * steering-wheel "next track" as 29 therefore opened the dialler.
+     *
+     * The real skip codes are 15 and 16 (`KEYCODE_SEEK_SUB` /
+     * `KEYCODE_SEEK_ADD`), which that same handler routes to
+     * `MusicProvider.preSong(false)` / `nextSong(false)`.
+     */
+    const val NEXT = 16
+    const val PREVIOUS = 15
+
+    /** Launches the phone screen — never send this for a media button. */
+    const val PHONE = 29
+
+    /** Launches the CarLife home screen. */
+    const val MAIN = 30
 
     /** Digits: 35 maps to 0, so digit `d` is `35 + d`. */
     const val DIGIT_BASE = 35
@@ -80,9 +113,11 @@ internal object CarLifeHardKey {
     fun fromAndroid(keyCode: Int): Int? = when (keyCode) {
         android.view.KeyEvent.KEYCODE_BACK -> BACK
         android.view.KeyEvent.KEYCODE_ESCAPE -> BACK
-        // CarLife has no "home". Its BACK (14) is what returns to the CarLife
-        // home screen, which is exactly what the car's home button means here.
-        // Sending Android's 3 instead would land on CarLife 3 = hang up.
+        /*
+         * The car's home button means "go back to the CarLife home screen",
+         * which is BACK (14). CarLife's own HOME is 1 and MAIN is 30; sending
+         * Android's 3 would land on CarLife 3 = hang up the call.
+         */
         android.view.KeyEvent.KEYCODE_HOME -> BACK
         android.view.KeyEvent.KEYCODE_DPAD_CENTER -> OK
         android.view.KeyEvent.KEYCODE_ENTER -> OK
@@ -95,10 +130,14 @@ internal object CarLifeHardKey {
         android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> PLAY
         android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> STOP
         android.view.KeyEvent.KEYCODE_MEDIA_STOP -> STOP
+        // 16 / 15 — the SEEK codes, not 29/30. See NEXT / PREVIOUS above.
         android.view.KeyEvent.KEYCODE_MEDIA_NEXT -> NEXT
         android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS -> PREVIOUS
         android.view.KeyEvent.KEYCODE_CALL -> ANSWER
         android.view.KeyEvent.KEYCODE_ENDCALL -> HANG_UP
+        android.view.KeyEvent.KEYCODE_VOLUME_UP -> VOLUME_ADD
+        android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> VOLUME_SUB
+        android.view.KeyEvent.KEYCODE_VOLUME_MUTE -> MUTE
         android.view.KeyEvent.KEYCODE_0 -> DIGIT_BASE
         android.view.KeyEvent.KEYCODE_1 -> DIGIT_BASE + 1
         android.view.KeyEvent.KEYCODE_2 -> DIGIT_BASE + 2
@@ -113,7 +152,6 @@ internal object CarLifeHardKey {
         // Voice is a hard key after all: CarLife defines KEYCODE_VR_START (33)
         // and runs recognition itself against the phone's own microphone.
         android.view.KeyEvent.KEYCODE_VOICE_ASSIST -> VR_START
-        // Deliberately absent: KEYCODE_HOME, which CarLife reads as 3 = hang up.
         else -> null
     }
 

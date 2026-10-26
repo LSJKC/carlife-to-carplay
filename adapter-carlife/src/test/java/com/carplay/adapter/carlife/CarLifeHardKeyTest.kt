@@ -44,11 +44,16 @@ class CarLifeHardKeyTest {
     @Test
     fun `CarPlay next and previous use the CarLife hard-key channel`() {
         // Dispatch translates CarPlay HID media usages to Android media keys,
-        // then CarLifeProjectionAdapter translates those keys to 29/30.
-        // The adapter sends those values through MSG_TOUCH_CAR_HARD_KEY_CODE;
-        // E5's AudioManager route is intentionally not part of this path.
-        assertEquals(29, CarLifeHardKey.fromAndroid(KeyEvent.KEYCODE_MEDIA_NEXT))
-        assertEquals(30, CarLifeHardKey.fromAndroid(KeyEvent.KEYCODE_MEDIA_PREVIOUS))
+        // then CarLifeProjectionAdapter translates those to CarLife's own
+        // enumeration and sends them through MSG_TOUCH_CAR_HARD_KEY_CODE.
+        //
+        // 16 / 15 are KEYCODE_SEEK_ADD / KEYCODE_SEEK_SUB.
+        // `CarlifeConnectInitUtils.lambda$initHardKeyCodeModule$1` routes them
+        // to MusicProvider.nextSong / preSong. They are NOT 29/30: CommonParams
+        // defines 29 = KEYCODE_TEL and 30 = KEYCODE_MAIN, so the old mapping
+        // opened the dialler and the home screen instead of skipping tracks.
+        assertEquals(16, CarLifeHardKey.fromAndroid(KeyEvent.KEYCODE_MEDIA_NEXT))
+        assertEquals(15, CarLifeHardKey.fromAndroid(KeyEvent.KEYCODE_MEDIA_PREVIOUS))
         assertEquals(CarLifeProtocol.MSG_TOUCH_CAR_HARD_KEY_CODE, 425992)
     }
 

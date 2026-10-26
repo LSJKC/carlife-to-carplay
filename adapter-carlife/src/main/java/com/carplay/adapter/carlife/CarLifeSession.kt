@@ -62,6 +62,18 @@ internal class CarLifeSession(
     private val log: (String) -> Unit,
     private val hostId: String = "carlink-cast-host",
     /**
+     * The `vehicle_cn` reported in HU_STATISTIC_INFO.
+     *
+     * CarLife keys its resolution decisions off this value, and so does Honor
+     * Auto: it keeps one DeviceCastConfig per carModelId in
+     * `carconnect.db:device_cast_config` and answers `carlife_encode_format`
+     * from that row. Reporting 20011100 (which has such a row: 2202x1080@20)
+     * made Honor override whatever size VIDEO_ENCODER_INIT asked for. The
+     * default here is a channel with no row, so the encoder keeps the size this
+     * app requested.
+     */
+    private val vehicleChannel: String = CarLifeProto.DEFAULT_VEHICLE_CHANNEL,
+    /**
      * Panel and safe area to hand CarLife, or null to request the bare
      * rectangle this app has always asked for.
      *
@@ -361,8 +373,16 @@ internal class CarLifeSession(
                 // authorization timer as soon as the protocol matches and only
                 // stops it on this report; without it the phone shows
                 // "车机版本未经CarLife授权，即将断开连接" and tears the session down.
-                sendCommand(CarLifeProtocol.HU_STATISTIC_INFO, CarLifeProto.statisticInfo(hostId))
-                log("已上报车辆渠道信息 20011100")
+                sendCommand(
+                    CarLifeProtocol.HU_STATISTIC_INFO,
+                    CarLifeProto.statisticInfo(hostId, vehicleChannel),
+                )
+                log(
+                    "已上报车辆渠道信息 $vehicleChannel" +
+                        if (vehicleChannel == CarLifeProto.DEFAULT_VEHICLE_CHANNEL) {
+                            "（该渠道在荣耀车联里没有自定义分辨率配置，编码尺寸由本应用决定）"
+                        } else "（注意：该渠道若在荣耀车联里有配置，会覆盖编码尺寸）",
+                )
             }
 
             CarLifeProtocol.MD_INFO -> {

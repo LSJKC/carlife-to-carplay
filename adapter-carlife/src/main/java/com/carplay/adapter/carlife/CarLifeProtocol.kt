@@ -419,15 +419,53 @@ internal object CarLifeProto {
      * HU_STATISTIC_INFO payload.
      *
      * StatisticVehicleUtil checks the channel against `2\d{7}` and rejects the
-     * two reserved values 20000000/20000001; 20011100 is a valid generic one.
+     * two reserved values 20000000/20000001; any other `2xxxxxxx` passes.
+     *
+     * The channel is not decoration. CarLife stores it as `vehicle_cn` and
+     * every resolution decision keys off it:
+     *
+     *     CarlifeUtil.setVehicleChannel(from.getChannel())
+     *       -> CommonParams.vehicleChannel
+     *       -> VideoResolution.getCustomResolution()  (only when
+     *          SP_CUSTOM_CN == vehicle_cn)
+     *       -> BaseScreenImpl.buildResolution()
+     *
+     * It is also the key the host uses. Honor Auto keeps one
+     * `DeviceCastConfig` per `carModelId` in
+     * `/data/data/com.hihonor.auto/databases/carconnect.db`
+     * (`device_cast_config`), and answers CarLife's `carlife_encode_format`
+     * query from that row:
+     *
+     *     {"bitRate":0,"carModelId":"20011100","displayHeight":1080,
+     *      "displayWidth":2202,"frameRate":20,"standbyMode":1}
+     *
+     * CarLife then writes those numbers over the MediaFormat it built from our
+     * VIDEO_ENCODER_INIT (`MediaFormatUtils.setVendorEncoderParams` ->
+     * `saveCustomResolution(w,h)`). That single row is why the coded size came
+     * out 2202x1080@20 no matter what was negotiated.
+     *
+     * `20011100` is the one channel that already has such a row, so it is the
+     * worst possible choice here. A channel with no row makes Honor fall back
+     * to `CastConstant.DEFAULT_*`, `carlife_encode_format` returns an empty
+     * Bundle, `saveCustomResolution` is never called, and the encoder keeps the
+     * size VIDEO_ENCODER_INIT asked for. [DEFAULT_VEHICLE_CHANNEL] is that
+     * value; it is overridable for a car that does want Honor's profile.
      */
-    fun statisticInfo(cuid: String): ByteArray = Writer()
+    fun statisticInfo(cuid: String, vehicleChannel: String = DEFAULT_VEHICLE_CHANNEL): ByteArray = Writer()
         .string(1, cuid)
         .string(2, "8.8.4")
         .int32(3, 884)
-        .string(4, "20011100")
+        .string(4, vehicleChannel)
         .int32(5, 1)
         .toByteArray()
+
+    /**
+     * The channel reported when the caller has no preference.
+     *
+     * Deliberately NOT 20011100: see [statisticInfo]. It still matches
+     * CarLife's `2\d{7}` check and is not one of the two reserved values.
+     */
+    const val DEFAULT_VEHICLE_CHANNEL = "20190101"
 
     /** MEDIA_INIT / NAVI_TTS_INIT: sampleRate, channelConfig, sampleFormat. */
     fun decodeAudioInit(payload: ByteArray): Triple<Int, Int, Int> {

@@ -140,8 +140,15 @@ object SenderNegotiation {
         return if (orderedPcm.isNotEmpty()) orderedPcm + aac else aac
     }
 
-    /** Matches the working E5 sender's PCM RTP shape; pacing follows sampleRate. */
-    const val PCM_SAMPLES_PER_PACKET = 352
+    /**
+     * Samples per LPCM RTP packet.
+     *
+     * 240 = 5 ms at 48 kHz, which is what a working sender on this exact head
+     * unit negotiates (both of its LPCM streams carry `spf: 240, sr: 48000,
+     * ct: 1`). The previous 352 was the Buick-E5 sender's shape and is not what
+     * this car is fed.
+     */
+    const val PCM_SAMPLES_PER_PACKET = 240
 }
 
 /** Binary data from a verified iAP command or that command's response; never infer proof from ACKs. */

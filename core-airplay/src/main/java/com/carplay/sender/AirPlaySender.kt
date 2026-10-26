@@ -111,6 +111,34 @@ class AirPlaySender(
     private var audioKey: ByteArray? = null
     private var audioCounter = 0L
     private var audioSequence = SecureRandom().nextInt(65536)
+
+    /**
+     * One negotiated LPCM stream.
+     *
+     * A working sender on this head unit brings up TWO of them — type 101
+     * `audioType=default` and type 100 `audioType=media` — each in its OWN
+     * SETUP with its own dataPort, and feeds both the same PCM. The car reports
+     * a growing sampleTime for both, so both are live outputs rather than a
+     * main/backup pair.
+     *
+     * Packing several streams into ONE SETUP does not work here: this receiver
+     * answers only the extra entries and silently drops the main one. That is
+     * why the multi-stream SETUP was removed in an earlier build; separate
+     * SETUPs are what it actually expects.
+     */
+    private class SecondaryAudio(
+        val format: SenderAudioFormat,
+        val socket: DatagramSocket,
+        val address: InetSocketAddress,
+        val key: ByteArray,
+    ) {
+        var sequence = SecureRandom().nextInt(65536)
+        var counter = 0L
+        var packets = 0L
+    }
+
+    /** Extra LPCM streams fed alongside the primary one. */
+    private val secondaryAudio = mutableListOf<SecondaryAudio>()
     /**
      * Audio queue entries belong to one ownership generation.  A chunk may
      * already have left [audioQueue] when the head unit takes the resource,
@@ -163,6 +191,15 @@ class AirPlaySender(
     private var commandIapStarting = false
     /** How many command-channel links have been opened, so a restart can rebuild one. */
     private var commandIapAttempts = 0
+    /**
+     * How many command-channel links failed to reach control-ready.
+     *
+     * Only this counter is capped. [commandIapAttempts] counts every link ever
+     * opened and is diagnostics only: the car legitimately reopens this link
+     * mid-session, and capping successes would eventually leave a marker
+     * unanswered.
+     */
+    private var commandIapFailures = 0
     private var commandModes = false
     private var selectedAudio: SenderAudioFormat? = null
 
@@ -228,11 +265,18 @@ class AirPlaySender(
             // time out exactly the way this fix exists to prevent.
             iap?.let { if (!it.isClosed) return it else iap = null }
             if (commandIapStarting) return iap
-            // A link the car restarted must be able to come back. The head unit
-            // closes this iAP2 round on purpose once it has what it needs, and a
-            // dead tunnel that is never replaced would leave the next marker
-            // unanswered — which is exactly the thirty-second teardown again.
-            if (commandIapAttempts >= MAX_COMMAND_IAP_ATTEMPTS) return null
+            /*
+             * Only FAILED links count toward the cap.
+             *
+             * The car closes this iAP2 round on purpose once it has what it
+             * needs and reopens one later in the same session — the reference
+             * sender runs two full rounds in a 115 s session (its log shows
+             * 0xAA00 → 0x1D01 twice). Counting successes here would exhaust a
+             * small budget on a healthy connection and leave the next marker
+             * unanswered, which is the teardown this whole path exists to
+             * prevent.
+             */
+            if (commandIapFailures >= MAX_COMMAND_IAP_FAILURES) return null
             commandIapAttempts++
             commandIapStarting = true
             val tunnel = PhoneIapTunnel(sendHandler = { data ->
@@ -254,6 +298,7 @@ class AirPlaySender(
                     commandIapStarting = false
                     if (error != null) {
                         events.diagnostic("Wi-Fi 命令通道 iAP2 认证未完成：${error.message ?: error.javaClass.simpleName}")
+                        commandIapFailures++
                         // Drop the dead tunnel so the next marker starts afresh.
                         if (iap === tunnel) iap = null
                     }
@@ -579,27 +624,35 @@ class AirPlaySender(
             )))), plistHeaders).body)
         val transport = synchronized(iapLock) {
             val selectedTransport = SenderNegotiation.control(iapReply)
-            if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH &&
-                earlyIap.isNotEmpty() &&
-                carEnablesIapChannel
-            ) {
-                events.diagnostic("已收到车机实际发起的 iAP 命令；建立命令控制通道并执行独立验证")
-                SenderControlTransport(SenderControlKind.WIFI_COMMAND)
-            } else {
-                if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH && earlyIap.isNotEmpty()) {
-                    /*
-                     * Markers already arrived before SETUP 130 finished. The
-                     * car does not advertise iAPChannel — it never does on this
-                     * firmware — but it does run a full iAP2 link on this
-                     * channel (authentication, identification, then real
-                     * control traffic). Keep Bluetooth as the control path and
-                     * attach the command link from the marker handler.
-                     */
+            if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) {
+                /*
+                 * The car rejects type 130 on every session (its reply has no
+                 * 130 stream at all), so this branch is the normal one here.
+                 *
+                 * 1.2.58 read the empty reply plus the missing `iAPChannel`
+                 * feature as "this car has no iAP2 on the command channel" and
+                 * kept control on Bluetooth. That was wrong: the car runs a
+                 * complete iAP2 link over `POST /command` — authentication,
+                 * identification with 47 parameters, then real control traffic
+                 * (0x4154/0x4157/0x4170/0x4C01/0x5000/0x6800) for the whole
+                 * session. The only thing that was broken was our bootstrap
+                 * order, which [PhoneBootstrap] now runs authentication-first
+                 * for [PhoneBootstrapPurpose.CONTROL_SESSION].
+                 *
+                 * Control therefore stays on the authenticated Bluetooth link,
+                 * and [ensureCommandIap] attaches the command-channel link from
+                 * the first marker the car sends. Both links answer; the marker
+                 * watchdog is what keeps the session alive.
+                 */
+                if (earlyIap.isNotEmpty()) {
                     events.diagnostic(
-                        "车机未声明 iAPChannel；命令通道链路改由收到链路标记后建立，控制通道沿用已认证蓝牙",
+                        "车机已开始发送命令通道 iAP2；链路将由首个标记建立，" +
+                            "控制通道沿用已认证蓝牙（iAPChannel=${carEnablesIapChannel}）",
                     )
                 }
-                selectedTransport.also { if (it.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) openingIap = false }
+                selectedTransport.also { openingIap = false }
+            } else {
+                selectedTransport
             }
         }
         events.diagnostic("type 130 协商结果：${transport.kind}，回复字段数=${iapReply.size}")
@@ -671,21 +724,26 @@ class AirPlaySender(
         )
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
-        // MIB3 screen SETUP shape: latencyMs, uuid, displayWidth/displayHeight.
-        //
-        // The key is `uuid`, not `displayUUID` — the latter is the shape a
-        // different Delphi firmware uses, and sending it here left the car
-        // without the display it was supposed to place the picture on.
-        // displayWidth/displayHeight are the *panel* size the car declared, not
-        // the coded size: they are what tells the head unit where the window
-        // sits, and leaving them out is consistent with a picture that is not
-        // placed where the car expects.
+        /*
+         * Screen SETUP, matching the reference sender on this exact car.
+         *
+         * Its body on the E2LB is exactly four keys:
+         *
+         *     {type:110, streamConnectionID, latencyMs:100, uuid}
+         *
+         * Earlier builds also sent displayWidth/displayHeight on the theory
+         * that they tell the head unit where the window sits. The reference
+         * capture does not contain them, and the panel size is already
+         * negotiated in /info — repeating it here describes a different stream
+         * than the one the car expects.
+         *
+         * The key is `uuid`, not `displayUUID`: the latter is a different
+         * Delphi firmware's shape and left this car without a display.
+         */
         val stream = linkedMapOf<String, Any>(
             "type" to 110,
             "streamConnectionID" to connection,
             "latencyMs" to SCREEN_LATENCY_MS,
-            "displayWidth" to selected.width,
-            "displayHeight" to selected.height,
         )
         selected.uuid?.let { stream["uuid"] = it }
         val reply = streams(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(stream))), plistHeaders).body)
@@ -1105,6 +1163,103 @@ class AirPlaySender(
         } else {
             events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
         }
+        /*
+         * Bring up the companion LPCM stream.
+         *
+         * A working sender on this head unit runs two: type 101 `default` and
+         * type 100 `media`. The car reports a growing sampleTime for BOTH, so
+         * this is not a main/backup pair — the head unit really does consume
+         * both, and with only one stream up its audio path looked alive while
+         * the session still died. Each stream gets its own SETUP, dataPort and
+         * encryption key; they cannot share one.
+         *
+         * Only LPCM does this. AAC already is the single media stream the car
+         * expects, and adding a second AAC stream is not something any working
+         * sender does.
+         */
+        if (format.isPcm) setupCompanionAudio(wire, format, shared, address)
+    }
+
+    /**
+     * Opens the second LPCM stream (the one the primary SETUP does not cover).
+     *
+     * Failures are reported and swallowed: the primary stream is already
+     * running, and losing the companion must not take the session down.
+     */
+    private fun setupCompanionAudio(
+        wire: RtspWire,
+        format: SenderAudioFormat,
+        shared: ByteArray,
+        address: InetAddress,
+    ) {
+        val companionType = when (format.streamType) {
+            100 -> 101
+            101 -> 100
+            else -> return
+        }
+        val companionAudioType = if (companionType == 101) "default" else "media"
+        val id = SecureRandom().nextLong().and(Long.MAX_VALUE)
+        val local = runCatching {
+            DatagramSocket(null).also {
+                bindDatagram(it)
+                it.bind(InetSocketAddress(localAddress(), 0))
+            }
+        }.getOrElse {
+            events.diagnostic("第二条音频流套接字创建失败：${it.message}")
+            return
+        }
+        own(local)
+        val descriptor = linkedMapOf<String, Any>(
+            "type" to companionType,
+            "audioType" to companionAudioType,
+            "audioFormat" to format.formatBits,
+            "streamConnectionID" to id,
+            "audioLatencyMs" to PCM_LATENCY_MS,
+            "spf" to format.samplesPerPacket,
+            "sr" to format.sampleRate,
+            "ct" to 1,
+            "input" to false,
+        )
+        val reply = runCatching {
+            streams(
+                wire.request(
+                    "SETUP", "/",
+                    encode(mapOf("streams" to listOf(descriptor))),
+                    plistHeaders,
+                ).body,
+            )
+        }.onFailure {
+            events.diagnostic("第二条音频流 SETUP 失败：${it.message}")
+        }.getOrNull() ?: return
+        val accepted = reply.firstOrNull { number(it["dataPort"]) in 1..65535 }
+        if (accepted == null) {
+            events.diagnostic(
+                "第二条音频流未被接受：回包=${reply.joinToString(" | ") { s ->
+                    "type=${number(s["type"])} keys=${s.keys.joinToString(",")}"
+                }}",
+            )
+            return
+        }
+        val port = number(accepted["dataPort"])
+        val responseSeed = unsignedPlistDecimal(accepted["streamConnectionID"] ?: id) ?: id.toString()
+        val key = AirPlayCrypto.hkdfSha512(
+            shared,
+            "DataStream-Salt$responseSeed".toByteArray(),
+            "DataStream-Output-Encryption-Key".toByteArray(),
+        )
+        synchronized(audioQueueLock) {
+            secondaryAudio += SecondaryAudio(
+                format = format,
+                socket = local,
+                address = InetSocketAddress(address, port),
+                key = key,
+            )
+        }
+        events.diagnostic(
+            "第二条音频流已建立：type=$companionType audioType=$companionAudioType " +
+                "port=$port spf=${format.samplesPerPacket} audioLatencyMs=$PCM_LATENCY_MS " +
+                "streamConnectionID=$responseSeed",
+        )
     }
 
     /**
@@ -1352,7 +1507,9 @@ class AirPlaySender(
                     paceAudioPacket(
                         1_000_000_000L * format.samplesPerPacket / format.sampleRate,
                     )
-                    sendAudioPacket(key, format, pcmToWire(payload), pcmTimestamp(format))
+                    val timestamp = pcmTimestamp(format)
+                    sendAudioPacket(key, format, pcmToWire(payload), timestamp)
+                    sendCompanionAudio(payload, timestamp)
                     pcmSamples += format.samplesPerPacket
                     offset += frameBytes
                     pcmCarry = if (offset >= merged.size) {
@@ -1486,6 +1643,42 @@ class AirPlaySender(
             )
         } else if (sent % 200L == 0L) {
             events.diagnostic("音频已发送 $sent 包（${format.sampleRate}Hz，第 $timestamp 采样）")
+        }
+    }
+
+    /**
+     * Feeds the same PCM to every companion LPCM stream.
+     *
+     * Each stream has its own sequence counter, encryption counter and nonce
+     * but shares the RTP timestamp, because they are the same audio at the same
+     * instant — that is how the reference sender drives them.
+     */
+    private fun sendCompanionAudio(payload: ByteArray, timestamp: Int) {
+        if (secondaryAudio.isEmpty()) return
+        val wirePayload = pcmToWire(payload)
+        val streams = synchronized(audioQueueLock) { secondaryAudio.toList() }
+        for (stream in streams) {
+            if (closed.get()) return
+            val header = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN).apply {
+                put(0x80.toByte()); put((stream.format.streamType and 0x7f).toByte())
+                putShort((stream.sequence++).toShort()); putInt(timestamp); putInt(0)
+            }.array()
+            val nonce = AirPlayCrypto.nonce64(stream.counter++)
+            val sealed = AirPlayCrypto.chachaSeal(stream.key, nonce, wirePayload, header.copyOfRange(4, 12))
+            val packet = header + sealed + nonce.copyOfRange(4, 12)
+            runCatching {
+                stream.socket.send(DatagramPacket(packet, packet.size, stream.address))
+            }.onFailure {
+                if (!closed.get()) events.diagnostic("第二条音频流发送失败：${it.message}")
+                return
+            }
+            val sent = ++stream.packets
+            if (sent == 1L) {
+                events.diagnostic(
+                    "第二条音频流首包：type=${stream.format.streamType} ${payload.size}B " +
+                        "ts=$timestamp 目标=${stream.address}",
+                )
+            }
         }
     }
     private fun handleCommand(body: ByteArray): ControlReply {
@@ -1717,7 +1910,7 @@ class AirPlaySender(
          * the same way), so a dead tunnel has to be replaceable; the cap only
          * stops a car that answers nothing from spinning up links forever.
          */
-        private const val MAX_COMMAND_IAP_ATTEMPTS = 4
+        private const val MAX_COMMAND_IAP_FAILURES = 4
         /** How many touch reports are written out in full before only counts remain. */
         private const val TOUCH_REPORTS_LOGGED = 8
 
@@ -1756,7 +1949,16 @@ class AirPlaySender(
          * what the phone actually sends.
          */
         private const val ALT_AUDIO_OPUS_FORMAT = 0x40000000L
-        private const val PCM_LATENCY_MS = 1000  // PCM LPCM(type100) 采样率需与 AAC 同步，否则车机缓冲满导致 30s 拆链
+        /**
+         * Scheduling lead for LPCM.
+         *
+         * 100 ms is what a working sender on this head unit negotiates on both
+         * of its LPCM streams (`audioLatencyMs: 100`). The previous 1000 was a
+         * guess that came from a trace of a different firmware; with 5 ms
+         * packets it also meant the receiver buffered a full second before
+         * starting, which is what made audio feel late and then stall.
+         */
+        private const val PCM_LATENCY_MS = 100
 
         /**
          * The capture exposes these as HAL input/output sample buffers (IL/OL).
@@ -1772,11 +1974,15 @@ class AirPlaySender(
         /**
          * Scheduling lead for the screen stream.
          *
-         * A working sender on this firmware uses 75 ms for the MIB3 screen
-         * stream. It is also what keeps the picture in step with the panel
-         * window the car reserved for it.
+         * 100 ms, matching the reference sender on this exact head unit. Its
+         * screen SETUP on the E2LB is
+         * `{type:110, streamConnectionID, latencyMs:100, uuid}` and it uses the
+         * same value for both of its audio streams. An earlier build sent 75
+         * on the theory that the MIB3 profile used it; the capture from this
+         * car says otherwise, and this is the lead the receiver schedules its
+         * own render against.
          */
-        private const val SCREEN_LATENCY_MS = 75
+        private const val SCREEN_LATENCY_MS = 100
 
         private val CONTROLLER_FEATURES = listOf(
             "uiContext",
