@@ -138,7 +138,27 @@ object CarPanelGeometry {
         // Cropping it into safeArea deletes the side rail and bottom controls.
         // Safe viewport placement is reserved for a source that is actually
         // encoded as the zero-origin safe rectangle.
-        val viewport = if (sourceIsSafeArea) resolveViewport(panel, policy) else null
+        /*
+         * The safe-area policy always applies, whatever size CarLife encodes.
+         *
+         * CarLife ignores save_area_* when drawing: it always fills the canvas
+         * it was told to encode, so a "safe area" build still arrives as
+         * 1972x520. Two facts force the picture to be placed rather than
+         * passed through:
+         *
+         *  - The car checks the encoder's reported size against the canvas it
+         *    declared and answers SETUP with 400 when they differ, so the
+         *    source can never be shrunk to the safe rectangle.
+         *  - The driver still asked for CarLife inside the safe rectangle with
+         *    wallpaper around it.
+         *
+         * SAFE_VIEWPORT exists for exactly this: keep the whole source frame
+         * (no cropping, so no control is lost) and scale it into the safe
+         * rectangle, leaving the wallpaper visible outside. STRICT/RELAXED/
+         * CUSTOM choose that rectangle; OFF and a rectangle equal to the panel
+         * leave the source full-screen.
+         */
+        val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
             return VideoPlacement(
                 x = viewport.first,

@@ -609,14 +609,28 @@ internal class CarLifeSession(
             log("safeAreaPolicy 未设置，使用全屏编码")
         }
 
-        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
-        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
+        /*
+         * The coded frame is always the canvas the head unit announced.
+         *
+         * The safe rectangle is layout metadata, passed below as
+         * areaWidth/areaHeight/areaX/areaY so CarLife keeps its UI inside it.
+         * It must not shrink the coded frame: the car checks the size the
+         * encoder reports against the canvas it declared, and answers SETUP
+         * with 400 when they differ. Measured on the Buick unit — canvas
+         * 1972x520, encoder reported 1408x476, SETUP refused.
+         *
+         * The safe-area policy still decides how the compositor places the
+         * picture (full canvas or inside the safe rectangle); it does not
+         * decide how large the source is encoded.
+         */
+        val sourceWidth = area.panelWidth
+        val sourceHeight = area.panelHeight
 
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
-                "CarLife 源=${sourceWidth}x$sourceHeight " +
-                "(${if (useSafeAreaSource) "安全区" else "全屏"})，" +
-                "元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})",
+                "CarLife 源=${sourceWidth}x$sourceHeight (画布)，" +
+                "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})，" +
+                "策略=${if (useSafeAreaSource) "启用" else "未启用"}",
         )
         return CarLifeProto.videoEncoderInfo(
             sourceWidth, sourceHeight, fps,

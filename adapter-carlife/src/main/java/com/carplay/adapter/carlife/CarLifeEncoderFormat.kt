@@ -44,13 +44,23 @@ internal data class CarLifeEncoderFormat(
         put("save_area_y", safeY)
         put("need_adapter_screen", if (needAdapterScreen) 1 else 0)
         put("draw_ui_outside_safe_area", if (drawUiOutsideSafeArea) 1 else 0)
-        put("panel_width", panelWidth)
-        put("panel_height", panelHeight)
-        put("real_width", panelWidth)
-        put("real_height", panelHeight)
-        put("default_width", panelWidth)
-        put("default_height", panelHeight)
-        put("res_accuracy", true)
+        /*
+         * This is the only reply CarLife acts on for a custom resolution.
+         *
+         * MediaFormatUtils.setVendorEncoderParams asks the host through
+         * carlife_encode_format and then reads exactly `width` and `height`
+         * back from the Bundle; when both are positive it applies them to the
+         * MediaFormat and calls VideoResolution.saveCustomResolution(w, h), so
+         * CarLife encodes at that size from then on instead of whatever its
+         * own settings screen defaults to. Before this the reply carried only
+         * safe-area keys, CarLife found no width/height, and the encoder kept
+         * using its built-in default — which is what made the picture soft.
+         *
+         * The values are the panel the head unit negotiated, not the safe
+         * rectangle: the coded frame must match the canvas the car announced.
+         */
+        put("width", panelWidth)
+        put("height", panelHeight)
     }
 
     companion object {

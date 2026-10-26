@@ -159,13 +159,6 @@ class AirPlaySender(
     private var commandModes = false
     private var selectedAudio: SenderAudioFormat? = null
 
-    /**
-     * Audio streams the car listed in /info, as (type, audioType, output bits).
-     *
-     * Kept so setupAudio() can offer exactly the auxiliary streams this car
-     * declared, in the format it declared, instead of fixed Opus placeholders.
-     */
-    private var declaredAuxStreams: List<Triple<Int, String, Long>> = emptyList()
     @Volatile private var audioProfileStable = false
     @Volatile private var audioProfileSetupComplete = false
     private val iapLock = Any()
@@ -443,15 +436,6 @@ class AirPlaySender(
         }
         val speech = audioEntries.filter { it["audioType"] == "speechRecognition" }
         val duplex = speech.filter { ((it["audioInputFormats"] as? Number)?.toLong() ?: 0L) and 0x50L != 0L }
-        // Remember what this car actually offers as auxiliary audio, so the
-        // SETUP can ask for those streams with those formats only.
-        declaredAuxStreams = audioEntries.mapNotNull { entry ->
-            val type = (entry["type"] as? Number)?.toInt() ?: return@mapNotNull null
-            val bits = (entry["audioOutputFormats"] as? Number)?.toLong() ?: return@mapNotNull null
-            val audioType = entry["audioType"]?.toString() ?: return@mapNotNull null
-            if (bits == 0L) return@mapNotNull null
-            Triple(type, audioType, bits)
-        }
         events.diagnostic(
             when {
                 speech.isEmpty() -> "车机未声明 speechRecognition 项：麦克风上行不可能，无需再试"
@@ -864,76 +848,44 @@ class AirPlaySender(
         // The primary AAC shape mirrors the Buick iPhone capture. The older
         // expanded descriptor is retained as a fallback for firmware that
         // accepted that shape first.
+        /*
+         * One stream per SETUP, with every field the receiver checks.
+         *
+         * Verified against two independent working senders:
+         *
+         *  - The iPhone's own request for MainHighAudio, recovered from the
+         *    Buick sysdiagnose, is a single-entry "streams" array carrying
+         *    controlPort, spf, audioFormat, supportsHighAccuracyTimestamps,
+         *    audioType and audioLatencyMs — one stream, not three.
+         *  - a-sender (github.com/sender/a-sender) sends the same
+         *    single-entry shape and additionally sets `type`, `input` and
+         *    `supportsRTPPacketRedundancy`. Its notes record that a receiver
+         *    treats an absent `input` as "this stream cannot be used" and
+         *    abandons the stream during audio init.
+         *
+         * This build previously packed the main stream plus two hard-coded Opus
+         * placeholders (types 101 and 106) into one SETUP. The Buick unit
+         * answered that with only the 101 and 106 entries — the main stream was
+         * dropped — and the code then re-sent everything in a legacy shape that
+         * the car refused with 400.
+         */
         fun descriptor(streamType: Int, audioFormat: Long, legacy: Boolean, audioType: String = "media"): Map<String, Any> = linkedMapOf<String, Any>().apply {
-            if (format.isPcm || legacy) put("streamConnectionID", id)
-            if (!format.isPcm && !legacy && streamType in setOf(100, 102)) {
-                // The Buick iPhone capture shows this exact MainHighAudio
-                // request. `type` is assigned by the car in the response
-                // (102), while controlPort is the sender-side UDP port.
-                put("controlPort", local.localPort)
-                put("spf", if (streamType == 100) 1024 else 960)
-                put("audioFormat", audioFormat)
-                put("supportsHighAccuracyTimestamps", true)
-                put("audioType", audioType)
-                put("audioLatencyMs", AAC_LATENCY_MS)
-            } else {
-                // Keep the previously accepted descriptor for PCM and as a
-                // compatibility fallback on firmware that rejects the
-                // reference AAC request.
-                put("type", streamType)
-                put("audioType", audioType)
-                put("audioFormat", audioFormat)
-                if (legacy) put("controlPort", local.localPort)
-                put("ct", if (format.isPcm) 1 else 4)
-                put("spf", if (streamType == 100) 1024 else 960)
-                put("sr", format.sampleRate)
-                put("audioLatencyMs", AAC_LATENCY_MS)
-                put("input", false)
-            }
-            if (!format.isPcm && legacy && streamType in setOf(100, 102)) {
-                // AAC fallback shape carries the extra fields the older
-                // receiver accepted before the iPhone-compatible request was
-                // added.
-                put("encryptionType", 0)
-                put("channels", if (streamType == 100) 2 else 1)
-                put("bytesPerFrame", (if (streamType == 100) 2 else 1) * 2)
-                put("framesPerPacket", if (streamType == 100) 1024 else 960)
-                put("audioMode", 0)
-                put("supportsHighAccuracyTimestamps", true)
-            }
+            put("type", streamType)
+            put("streamConnectionID", id)
+            put("audioFormat", audioFormat)
+            put("audioType", audioType)
+            put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
+            put("input", false)
+            put("supportsRTPPacketRedundancy", false)
+            put("supportsHighAccuracyTimestamps", true)
+            put("spf", format.samplesPerPacket)
+            put("ct", if (format.isPcm) 1 else 4)
+            put("sr", format.sampleRate)
+            if (!format.isPcm && !legacy) put("controlPort", local.localPort)
         }
 
-        // Build multi-stream descriptors: primary + secondary audio types
-        // This ensures car receives all expected stream types in one SETUP,
-        // preventing 30-second timeout when looking for missing streams
-        fun buildMultiStreamSetup(legacy: Boolean): List<Map<String, Any>> {
-            val streamList = mutableListOf<Map<String, Any>>()
-
-            // Primary: format.streamType (usually 100 or 102, AAC)
-            streamList.add(descriptor(format.streamType, format.formatBits, legacy, "media"))
-
-            /*
-             * Auxiliary streams: only the ones this car listed, in the format
-             * it listed for them.
-             *
-             * These used to be fixed Opus placeholders (type 101 and 106 at
-             * 0x40000000) added for every car, on the theory that a single
-             * stream would time out after thirty seconds. The Buick capture has
-             * no such streams — the iPhone sends MainHighAudio alone — and the
-             * placeholders do not match what that unit advertises (0x40008000),
-             * so it answered the whole SETUP with 400. Offer an auxiliary
-             * stream only when /info named it and its format; a car that
-             * declares a stream gets exactly that stream.
-             */
-            declaredAuxStreams
-                .filter { (type, _, _) -> type != format.streamType && type in setOf(101, 106) }
-                .distinctBy { (type, _, _) -> type }
-                .forEach { (type, audioType, bits) ->
-                    streamList.add(descriptor(type, bits, legacy, audioType))
-                }
-
-            return streamList
-        }
+        fun buildMultiStreamSetup(legacy: Boolean): List<Map<String, Any>> =
+            listOf(descriptor(format.streamType, format.formatBits, legacy, "media"))
 
         // Which shape the car took is recorded, because it is the only evidence
         // that can settle whether `controlPort` was ever the reason the car
@@ -952,15 +904,45 @@ class AirPlaySender(
             }}",
         )
         val accepted = runCatching {
-            streams(wire.request("SETUP", "/", encode(mapOf("streams" to primarySetup)), plistHeaders).body)
-                .firstOrNull { number(it["type"]) == format.streamType }
+            val replyStreams = streams(
+                wire.request("SETUP", "/", encode(mapOf("streams" to primarySetup)), plistHeaders).body,
+            )
+            // Report what came back before picking one: a 200 whose streams do
+            // not carry the type we asked for looks identical to a rejection
+            // unless the reply is in the log.
+            events.diagnostic(
+                "音频 SETUP 回包：${replyStreams.joinToString(" | ") { stream ->
+                    "type=${number(stream["type"])} keys=${stream.keys.joinToString(",")}"
+                }}",
+            )
+            /*
+             * Pick the entry that carries a data port.
+             *
+             * This car answers the reference SETUP with a type=101 and a
+             * type=106 entry, both with streamConnectionID and dataPort, and
+             * with no type=102 entry at all — the main AAC stream is allocated
+             * silently and never echoed. Requiring the reply to name our
+             * stream type therefore declared a perfectly good 200 a failure and
+             * re-sent the same request in the legacy shape, which this car
+             * answers with 400. The transport is the data port: whichever entry
+             * carries one is the stream to play into.
+             */
+            replyStreams.firstOrNull { number(it["type"]) == format.streamType }
+                ?: replyStreams.firstOrNull { number(it["dataPort"]) in 1..65535 }
         }.onFailure {
             events.diagnostic("音频 SETUP 参考字段集被拒：${it.message}")
         }.getOrNull() ?: run {
             usedLegacy = true
             events.diagnostic("音频 SETUP 未接受参考字段集，回退为含 controlPort 的旧字段集")
-            streams(wire.request("SETUP", "/", encode(mapOf("streams" to buildMultiStreamSetup(true))), plistHeaders).body)
-                .firstOrNull { number(it["type"]) == format.streamType }
+            val legacyStreams = streams(
+                wire.request("SETUP", "/", encode(mapOf("streams" to buildMultiStreamSetup(true))), plistHeaders).body,
+            )
+            events.diagnostic(
+                "音频 SETUP 回包（旧字段集）：${legacyStreams.joinToString(" | ") { stream ->
+                    "type=${number(stream["type"])} keys=${stream.keys.joinToString(",")}"
+                }}",
+            )
+            legacyStreams.firstOrNull { number(it["type"]) == format.streamType }
         } ?: error("车机拒绝协商后的音频流")
         events.diagnostic(
             "音频 SETUP 已接受：${if (usedLegacy) "旧字段集（含 controlPort）" else "参考字段集（无 controlPort）"}（已发送多流描述防 30s 超时），" +
@@ -1543,6 +1525,17 @@ class AirPlaySender(
          * by the auxiliary Opus streams.
          */
         private const val AAC_LATENCY_MS = 1000
+
+        /**
+         * Opus 48 kHz mono, the format the Buick capture shows for AltAudio.
+         *
+         * The iPhone opens this as an auxiliary stream alongside MainHighAudio
+         * (`AltAudio/default, Opus, 48000 Hz, Mono, 960 samples/packet,
+         * 0x40000000`). It is not taken from /info: that unit advertises
+         * 0x40008000 for types 101/106, which is a different shape and is not
+         * what the phone actually sends.
+         */
+        private const val ALT_AUDIO_OPUS_FORMAT = 0x40000000L
         private const val PCM_LATENCY_MS = 1000  // PCM LPCM(type100) 采样率需与 AAC 同步，否则车机缓冲满导致 30s 拆链
 
         /**
