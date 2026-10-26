@@ -100,7 +100,46 @@ class PhoneBootstrap(
     private var identification: Iap2Frame? = null
     private var lastReportedStatus: BootstrapStatus? = null
 
-    fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
+    /**
+     * Starts (or resumes) the bootstrap in the order this transport expects.
+     *
+     * The Bluetooth link and the Wi-Fi command channel want opposite orders.
+     * Bluetooth goes identification-first: 0x1d00, and the car answers 0x1d01
+     * with its capabilities before any certificate is exchanged.
+     *
+     * The command channel is the other way round. That car-side runtime starts
+     * a control session by requesting authentication, and it ignores an
+     * identification request that arrives before the session is authenticated:
+     *
+     *     13:18:49.942  RX CSM 0xAA00            (car asks for authentication)
+     *     13:18:50.507  RX CSM 0xAA03            (signature over our challenge)
+     *     13:18:50.528  TX CSM 0xAA05            (we report success)
+     *     13:18:50.844  TX CSM 0x1D00            (only NOW)
+     *     13:18:50.942  RX CSM 0x1D01 parameters=47
+     *
+     * Sending 0x1d00 first on this transport produces no answer at all — every
+     * command-tunnel session up to 1.2.57 reached READY, sent 0x1d00, was never
+     * identified, retried on a 3s timer and had its control connection reset.
+     * That is why the link was disabled in 1.2.58 instead of being ordered
+     * correctly, and the car has been tearing the session down about thirteen
+     * seconds after its first command-channel link marker ever since.
+     */
+    fun begin() {
+        when {
+            authenticated && !identified -> { onStage("识别车机"); send(empty(0x1d00)) }
+            !authenticated && authenticatesFirst -> {
+                // Re-sending 0xAA00 while a challenge is already in flight would
+                // restart the exchange the car is midway through.
+                if (leaf == null) { onStage("验证车机身份"); send(empty(0xaa00)) }
+            }
+            !identified -> { onStage("识别车机"); send(empty(0x1d00)) }
+        }
+        reportStatus()
+    }
+
+    /** True when this transport authenticates before it identifies. */
+    private val authenticatesFirst: Boolean
+        get() = purpose == PhoneBootstrapPurpose.CONTROL_SESSION
 
     @Synchronized fun status() = BootstrapStatus(identified, authenticated, leaf != null, challenge != null, endpoint != null,
         networkRequestQueued, supportsStart, controlReady)
@@ -140,11 +179,34 @@ class PhoneBootstrap(
                     diagnostic("车机版本信息：${versionInfo!!.diagnostic()}；固件及 iAP2 会话版本不等于 CarPlay SDK 版本，SDK 等待 0x4301 声明")
                 }
                 identified = true
-                send(empty(0x1d02)); send(empty(0xaa00)); onStage("验证车机身份")
+                send(empty(0x1d02))
+                // The command channel authenticated before identifying, so
+                // restarting the exchange here would ask the car for a second
+                // certificate it will not send. Go straight to publish.
+                if (!authenticated) send(empty(0xaa00))
+                if (authenticated || purpose == PhoneBootstrapPurpose.CONTROL_SESSION) publish()
+                else onStage("验证车机身份")
             }
             0x1d03, 0xaa04 -> error("车机拒绝识别或认证")
+            0xaa00 -> {
+                /*
+                 * The car asking US to authenticate — the command channel's
+                 * opening move. Nothing to answer directly: the certificate
+                 * arrives in the 0xAA01 that follows, which the handler below
+                 * already knows how to answer.
+                 *
+                 *     13:18:49.942 RX CSM 0xAA00
+                 *     13:18:50.029 RX CSM 0xAA01 (certificate, then 0xAA02 us)
+                 */
+                onStage("车机请求认证")
+            }
             0xaa01 -> {
-                check(identified && leaf == null) { "认证证书时序错误" }
+                check(leaf == null) { "认证证书时序错误" }
+                // Identification-first transports have already identified by
+                // the time the certificate arrives; the command channel has
+                // not, and requiring it here is what made every command-tunnel
+                // session die in 1.2.32–1.2.57.
+                check(identified || authenticatesFirst) { "识别完成前收到认证证书" }
                 val trusted = validateCertificates(body.bytes(0))
                 leaf = trusted
                 challenge = ByteArray(if (trusted.publicKey is ECPublicKey) 32 else 20).also(SecureRandom()::nextBytes)
@@ -157,7 +219,11 @@ class PhoneBootstrap(
                 if (!verifyChallenge(certificate, nonce, body.bytes(0))) {
                     send(empty(0xaa04)); error("车机认证签名无效")
                 }
-                authenticated = true; challenge = null; send(empty(0xaa05)); publish()
+                authenticated = true; challenge = null; send(empty(0xaa05))
+                // On the command channel authentication comes first, so the
+                // identification request is due now — and only now.
+                if (!identified) { onStage("识别车机"); send(empty(0x1d00)) }
+                else publish()
             }
             0x4301, 0x5703 -> {
                 check(identified && authenticated) { "认证完成前收到网络配置" }

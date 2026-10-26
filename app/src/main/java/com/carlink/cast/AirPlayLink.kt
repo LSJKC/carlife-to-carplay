@@ -448,18 +448,27 @@ internal class AirPlayLink(
                             check(System.nanoTime() < deadline) { "Wi-Fi iAP2 认证超时" }
                         }
                         if (!control.status().identified &&
-                            identifyRetries < 2 &&
+                            identifyRetries < 3 &&
                             System.nanoTime() >= nextIdentifyRetry
                         ) {
-                            // Some E2LB sessions open the command tunnel before
-                            // the receiver has armed its identification reader.
-                            // A bounded repeat of 0x1d00 recovers that race;
-                            // unbounded repeats would themselves trigger the
-                            // peer-detection restart watchdog.
+                            /*
+                             * Bounded retry of whatever this phase is waiting
+                             * for. On the command tunnel the bootstrap now runs
+                             * authentication-first, so the repeat before
+                             * 0xAA01 re-asks for authentication and only the
+                             * later ones re-send 0x1d00; [PhoneBootstrap.begin]
+                             * decides which, and refuses to restart an exchange
+                             * the car is already midway through.
+                             */
                             identifyRetries++
                             control.begin()
                             nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_000)
-                            log("Wi-Fi iAP2 尚未收到 0x1d01，重发 StartIdentification（第 ${identifyRetries} 次）")
+                            val stage = control.status()
+                            log(
+                                "Wi-Fi iAP2 引导重试 #$identifyRetries：" +
+                                    "identified=${stage.identified} authenticated=${stage.authenticated} " +
+                                    "certificate=${stage.certificateReceived}",
+                            )
                         }
                         val frame = runtime.recv(1000) ?: continue
                         control.receive(frame)

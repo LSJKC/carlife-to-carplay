@@ -60,10 +60,39 @@ internal object CarLifeProtocol {
      */
     const val HU_STATISTIC_INFO = 0x00018027
 
+    /**
+     * Mobile data subscription: the head unit tells CarLife which of its own
+     * data it wants pushed.
+     *
+     * This is the switch behind the cluster/centre-console media display.
+     * CarLife registers all three ids unconditionally
+     * (`CarlifeConnectHsgHandler.addMsg`) and waits for the car to ask:
+     *
+     *     0x18043 CARLIFE_DATA_SUBSCRIBE        -> answered with 0x10044 DONE
+     *     0x18045 CARLIFE_DATA_SUBSCRIBE_START  -> moduleID 2 = media info ON
+     *     0x18046 CARLIFE_DATA_SUBSCRIBE_STOP   -> moduleID 2 = media info OFF
+     *
+     * `CarlifeDataSubscribe.setMobileCarLifeState` sets
+     * `MusicInfoSender.setSubscibe(z)` from moduleID 2, and only then does the
+     * phone push `MSG_CMD_MEDIA_INFO` (0x10035) and
+     * `MSG_CMD_MEDIA_PROGRESS_BAR` (0x10036). Without this handshake the car
+     * shows "正在加载媒体…" forever — which is exactly what this project saw.
+     */
+    const val HU_DATA_SUBSCRIBE = 0x00018043
+    const val HU_DATA_SUBSCRIBE_START = 0x00018045
+    const val HU_DATA_SUBSCRIBE_STOP = 0x00018046
+
     // Phone -> head unit.
     const val PROTOCOL_VERSION_MATCH_STATUS = 0x00010002
     const val MD_INFO = 0x00010004
     const val VIDEO_ENCODER_INIT_DONE = 0x00010008
+
+    /** Answer to HU_DATA_SUBSCRIBE; carries the same module list back. */
+    const val DATA_SUBSCRIBE_DONE = 0x00010044
+
+    /** Media metadata and playback position pushed by the phone. */
+    const val MEDIA_INFO = 0x00010035
+    const val MEDIA_PROGRESS_BAR = 0x00010036
 
     /** Reply to VIDEO_ENCODER_FRAME_RATE_CHANGE; the phone confirms the new rate. */
     const val VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE = 0x0001000D
@@ -495,6 +524,47 @@ internal object CarLifeProto {
         }
         @Suppress("UNREACHABLE_CODE") ""
     }.getOrDefault("")
+
+    /**
+     * DATA_SUBSCRIBE_DONE: echoes the module list the car asked about.
+     *
+     * `CarlifeDataSubscribe.handleMobileCarLifeInfoList` reads `cnt` and one
+     * entry per module, answering with the same shape. moduleID 0 (turn-by-turn
+     * HUD) and 2 (media info) are the two it will report as supported; anything
+     * else is answered `supportFlag=false`.
+     */
+    fun dataSubscribeDone(moduleIds: List<Int>): ByteArray {
+        val writer = Writer().int32(1, moduleIds.size)
+        for (id in moduleIds) {
+            val supported = id == 0 || id == 2
+            writer.message(2, Writer().int32(1, id).bool(2, supported).toByteArray())
+        }
+        return writer.toByteArray()
+    }
+
+    /** Reads the module ids out of a HU_DATA_SUBSCRIBE / START / STOP body. */
+    fun decodeDataSubscribe(payload: ByteArray): List<Int> = runCatching {
+        val ids = mutableListOf<Int>()
+        val reader = Reader(payload)
+        while (true) {
+            when (val field = reader.nextField()) {
+                0 -> return@runCatching ids
+                2 -> {
+                    // Nested CarlifeSubscribeMobileCarLifeInfo: moduleID = field 1.
+                    val nested = Reader(reader.readBytes())
+                    while (true) {
+                        when (val inner = nested.nextField()) {
+                            0 -> break
+                            1 -> ids += nested.readInt32()
+                            else -> nested.skip()
+                        }
+                    }
+                }
+                else -> reader.skip()
+            }
+        }
+        @Suppress("UNREACHABLE_CODE") ids
+    }.getOrDefault(emptyList())
 
     fun decodeMatchStatus(payload: ByteArray): Int = runCatching {
         val reader = Reader(payload)

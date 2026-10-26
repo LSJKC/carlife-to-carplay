@@ -173,9 +173,8 @@ class AirPlaySender(
     /**
      * True when the head unit listed `iAPChannel` among the features it enabled.
      *
-     * It decides whether the Wi-Fi command channel is a usable iAP2 transport.
-     * A car without it accepts link markers there but never identifies the
-     * link, and resets the session about twenty seconds in.
+     * Kept for diagnostics only: it turned out NOT to decide whether the Wi-Fi
+     * command channel can carry iAP2. See [answerCommandChannel].
      */
     private var carEnablesIapChannel = false
     private val earlyIap = ArrayDeque<ByteArray>()
@@ -197,18 +196,28 @@ class AirPlaySender(
     /**
      * Opens the iAP2 link this head unit carries on the Wi-Fi command channel.
      *
-     * This firmware rejects the type-130 stream and then delivers iAP2 through
-     * `POST /command` `iAPSendMessage` anyway, starting with its six-byte link
-     * marker (`FF 55 02 00 EE 10`) once a second. Acknowledging those with 200
-     * is not enough: the marker is the link layer's detection handshake, and
-     * without a link to answer it the car retries for exactly thirty seconds
-     * and then tears the whole session down — measured on three captures, where
-     * every disconnect landed 30.0 s after the first marker.
+     * This firmware never enables `iAPChannel`, rejects the type-130 stream,
+     * and then delivers iAP2 through `POST /command` `iAPSendMessage` anyway,
+     * starting with its six-byte link marker (`FF 55 02 00 EE 10`) once a
+     * second. Acknowledging those with 200 is NOT enough — measured on four
+     * captures, the car resets the control connection 12.9 s after the first
+     * marker, every time:
      *
-     * So a real iAP2 link is attached to the command tunnel the first time the
-     * car speaks. [events.iapControl] runs the link and its identification on
-     * its own thread; failing it must not stop the video, because the link
-     * answering the marker is what keeps the session alive.
+     *     1.2.60  marker 8842  → reset 21791  (+12.9 s)
+     *     1.2.62  marker 10043 → reset 22956  (+12.9 s)
+     *     1.2.63  marker 10158 → reset 23011  (+12.9 s)
+     *     1.2.64  marker 7322  → reset 20204  (+12.9 s)
+     *
+     * 1.2.58 concluded from the missing `iAPChannel` that this channel could
+     * never work, because our 0x1d00 was never answered. The channel does work;
+     * the order was wrong. The reference sender drives it authentication-first
+     * on the same car:
+     *
+     *     RX 0xAA00 → TX 0xAA02 → RX 0xAA03 → TX 0xAA05 → TX 0x1D00 → RX 0x1D01
+     *
+     * and then exchanges real control traffic (0x4154, 0x4157, 0x4170, 0x4C01,
+     * 0x5000, 0x5001, 0x6800) over it for the whole session. [PhoneBootstrap]
+     * now uses that order for [PhoneBootstrapPurpose.CONTROL_SESSION].
      */
     private fun ensureCommandIap(): PhoneIapTunnel? {
         val wire = control ?: return null
@@ -376,16 +385,15 @@ class AirPlaySender(
             ?.map { it.toString() }
             .orEmpty()
         /*
-         * Whether this head unit runs iAP2 on the Wi-Fi command channel.
+         * Whether this head unit advertises iAP2 on the Wi-Fi command channel.
          *
-         * The Buick advertises exactly altScreen, viewAreas and enhancedSiri —
-         * the same three the iPhone negotiates in its own capture — and has no
-         * iAPChannel. On such a car the command channel carries iAP2 link
-         * markers but never answers an identification request: the link reaches
-         * READY, every StartIdentification (0x1d00) goes unanswered, the retry
-         * fires every three seconds, and about twenty seconds in the car resets
-         * the control connection. Control has to stay on the already
-         * authenticated Bluetooth link instead.
+         * The Buick never does: it advertises exactly altScreen, viewAreas and
+         * enhancedSiri, the same three the iPhone negotiates in its own capture.
+         * That absence is NOT evidence the channel is unusable — 1.2.58 read it
+         * that way only because our 0x1d00 went unanswered, and the reason was
+         * the bootstrap order, not the channel. The reference sender drives a
+         * complete iAP2 link over this very channel on this very car while
+         * advertising the same three features. The flag is kept for the log.
          */
         carEnablesIapChannel = enabledFeatures.any { it.equals("iAPChannel", ignoreCase = true) }
         events.diagnostic(
@@ -579,12 +587,16 @@ class AirPlaySender(
                 SenderControlTransport(SenderControlKind.WIFI_COMMAND)
             } else {
                 if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH && earlyIap.isNotEmpty()) {
-                    // The car sent link markers on the command channel but did
-                    // not advertise iAPChannel, so it will not identify a link
-                    // there. Keep control on Bluetooth and only acknowledge the
-                    // markers.
+                    /*
+                     * Markers already arrived before SETUP 130 finished. The
+                     * car does not advertise iAPChannel — it never does on this
+                     * firmware — but it does run a full iAP2 link on this
+                     * channel (authentication, identification, then real
+                     * control traffic). Keep Bluetooth as the control path and
+                     * attach the command link from the marker handler.
+                     */
                     events.diagnostic(
-                        "车机未声明 iAPChannel：命令通道仅应答不建链路，控制通道沿用已认证蓝牙",
+                        "车机未声明 iAPChannel；命令通道链路改由收到链路标记后建立，控制通道沿用已认证蓝牙",
                     )
                 }
                 selectedTransport.also { if (it.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) openingIap = false }
@@ -1498,12 +1510,11 @@ class AirPlaySender(
                  * acknowledged with 200 and nothing else.
                  */
                 val forwarded = receiveIap(data) ||
-                    (carEnablesIapChannel && ensureCommandIap()?.offer(data) == true)
+                    (ensureCommandIap()?.offer(data) == true)
                 val description = describeIapMessage(data)
                 if (!forwarded && reportedCommands.add("iAP:$description")) {
                     events.diagnostic(
-                        if (carEnablesIapChannel) "iAP 控制数据未被链路接收：字节=${data.size}（$description）"
-                        else "iAP 控制数据已收到（车机未启用 iAPChannel，仅应答）：字节=${data.size}（$description）",
+                        "iAP 控制数据未被链路接收：字节=${data.size}（$description）",
                     )
                 } else if (reportedCommands.add("first:$description")) {
                     events.diagnostic("收到车机 iAP2：字节=${data.size}（$description），已交给链路")

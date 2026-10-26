@@ -114,6 +114,17 @@ internal class CarLifeSession(
     /** Invalidates delayed rate requests when a newer encoder is initialized. */
     @Volatile private var encoderRateGeneration = 0L
 
+    /**
+     * True while the head unit has asked CarLife to push media metadata.
+     *
+     * CarLife only sends MEDIA_INFO / MEDIA_PROGRESS_BAR after the car's
+     * data-subscription handshake names module 2. Recorded so a session log
+     * shows whether "cluster has no media info" was a subscription problem or
+     * a metadata problem.
+     */
+    @Volatile var mediaInfoSubscribed = false
+        private set
+
     @Volatile var failure: Throwable? = null
         private set
 
@@ -473,6 +484,42 @@ internal class CarLifeSession(
             }
 
             CarLifeProtocol.MD_EXIT -> log("手机要求结束会话")
+
+            /*
+             * Mobile data subscription — the switch behind the cluster and
+             * centre-console media display.
+             *
+             * CarLife waits for the car to ask before it pushes anything.
+             * `CarlifeDataSubscribe.setMobileCarLifeState` flips
+             * `MusicInfoSender.setSubscibe` from moduleID 2, and only a
+             * subscribed sender emits MEDIA_INFO / MEDIA_PROGRESS_BAR. The
+             * cluster sat on "正在加载媒体…" in every field session because
+             * this handshake was never sent.
+             */
+            CarLifeProtocol.HU_DATA_SUBSCRIBE -> {
+                val modules = CarLifeProto.decodeDataSubscribe(payload)
+                sendCommand(
+                    CarLifeProtocol.DATA_SUBSCRIBE_DONE,
+                    CarLifeProto.dataSubscribeDone(modules),
+                )
+                log("已应答数据订阅：模块=${modules.joinToString(",")}（0=导航 2=媒体）")
+            }
+            CarLifeProtocol.HU_DATA_SUBSCRIBE_START -> {
+                val modules = CarLifeProto.decodeDataSubscribe(payload)
+                log(
+                    "车机开始订阅手机数据：模块=${modules.joinToString(",")}" +
+                        if (2 in modules) "，媒体信息已开启" else "",
+                )
+                mediaInfoSubscribed = 2 in modules || modules.isEmpty()
+            }
+            CarLifeProtocol.HU_DATA_SUBSCRIBE_STOP -> {
+                val modules = CarLifeProto.decodeDataSubscribe(payload)
+                log("车机停止订阅手机数据：模块=${modules.joinToString(",")}")
+                if (modules.isEmpty() || 2 in modules) mediaInfoSubscribed = false
+            }
+
+            CarLifeProtocol.MEDIA_INFO -> log("媒体信息已推送：${payload.size}B")
+            CarLifeProtocol.MEDIA_PROGRESS_BAR -> Unit
 
             else -> Unit
         }
