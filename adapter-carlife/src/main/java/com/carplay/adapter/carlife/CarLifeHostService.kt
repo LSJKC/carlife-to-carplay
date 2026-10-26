@@ -1,6 +1,8 @@
 package com.carplay.adapter.carlife
 
 import android.app.Service
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
@@ -46,6 +48,24 @@ class CarLifeHostService : Service() {
     private var pendingCastPrepared = false
     private var callbackDeathRecipient: IBinder.DeathRecipient? = null
 
+    /**
+     * The virtual display CarLife lays its car UI out on.
+     *
+     * CarLife's BaseScreenImpl.onDisplayCreate(displayId) resolves the id with
+     * DisplayManager.getDisplay(displayId) and then calls
+     * CarlifeScreenUtil.initVirtualPixels(display) — the layout size comes from
+     * that display, not from anything in the cast config. Answering 0 (the
+     * default physical display) made CarLife lay its UI out for this phone's
+     * 2324x1140 screen while we encoded a 1972x520 car canvas, which is why the
+     * picture never matched the panel and why the encode-format callback the
+     * resolution depends on never arrived.
+     *
+     * CarWith, which runs this head unit without dropping the session, answers
+     * with a real display id (`onCastPrepared displayId=4 active=true`).
+     */
+    private var castVirtualDisplay: VirtualDisplay? = null
+    private var castDisplayId: Int = 0
+
     private val audioListener = object : IRemoteAudioListener.Stub() {
         override fun onReceiveAudioStream(data: ByteArray?, offset: Int, length: Int, sampleRate: Int) {
             if (data == null || offset < 0 || length < 0 || offset > data.size - length) return
@@ -65,12 +85,10 @@ class CarLifeHostService : Service() {
                     "这是 CarLife 手机端虚拟画布，不是车机 H.264 画布；" +
                     "车机整屏/安全区由 VIDEO_ENCODER_INIT 单独协商"
             )
-            // Answer 0, exactly like the working probe host. CarLife then keeps
-            // rendering its car UI in its own off-screen display and encodes it
-            // itself; a real virtual display here sent it down the
-            // ScreenHonorImpl/HonorDisplayProxy path, where it rendered nothing
-            // into the encoder (10 fps of keep-alives, black car screen).
-            val displayId = 0
+            // CarLife lays its UI out on this display, so it has to be a real
+            // one sized for the car's canvas. Answering 0 gave it the phone's
+            // own screen and the picture never matched the panel.
+            val displayId = ensureCastDisplay(config)
             // CarLife may call prepareCast before setCastCallback. Keep the
             // request and complete it as soon as the callback arrives; dropping
             // it here leaves the phone waiting forever and produces transparent
@@ -79,6 +97,53 @@ class CarLifeHostService : Service() {
                 pendingCastPrepared = true
             }
             dispatchCastPrepared(displayId)
+        }
+
+        /**
+         * Creates (or reuses) the virtual display CarLife renders into.
+         *
+         * The size is the cast config CarLife asked for when it is sane, and
+         * the car's negotiated canvas otherwise. Density is fixed so CarLife's
+         * dp-based layout sees a car-sized screen rather than a phone-sized one.
+         */
+        private fun ensureCastDisplay(config: CastConfig?): Int {
+            val width = config?.width?.takeIf { it in 320..8192 }
+                ?: CarLifeBridge.castWidth.takeIf { it in 320..8192 }
+                ?: 1920
+            val height = config?.height?.takeIf { it in 200..8192 }
+                ?: CarLifeBridge.castHeight.takeIf { it in 200..8192 }
+                ?: 1080
+            val dpi = config?.dpi?.takeIf { it in 72..960 } ?: CAST_DISPLAY_DPI
+            castVirtualDisplay?.let { existing ->
+                if (castDisplayId != 0) {
+                    CarLifeBridge.log(
+                        "prepareCast: 复用虚拟屏 displayId=$castDisplayId ${width}x$height dpi=$dpi",
+                    )
+                    return castDisplayId
+                }
+            }
+            val manager = getSystemService(DisplayManager::class.java)
+            val display = runCatching {
+                manager?.createVirtualDisplay(
+                    "carlife-cast-display",
+                    width,
+                    height,
+                    dpi,
+                    null,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
+                )
+            }.getOrNull()
+            if (display == null) {
+                CarLifeBridge.log("prepareCast: 创建虚拟屏失败，回退到 displayId=0")
+                return 0
+            }
+            castVirtualDisplay = display
+            castDisplayId = display.display.displayId
+            CarLifeBridge.log(
+                "prepareCast: 已创建虚拟屏 displayId=$castDisplayId ${width}x$height dpi=$dpi；" +
+                    "CarLife 将按这个尺寸布局车机 UI",
+            )
+            return castDisplayId
         }
 
         override fun stopCast() {
@@ -321,6 +386,11 @@ class CarLifeHostService : Service() {
             pendingCastPrepared = false
             callbackDeathRecipient = null
         }
+        // Release the display CarLife was laying out on; leaving it behind keeps
+        // a system-side surface alive and the next session inherits a stale id.
+        runCatching { castVirtualDisplay?.release() }
+        castVirtualDisplay = null
+        castDisplayId = 0
         CarLifeBridge.musicInfo = null
         CarLifeBridge.musicProgress = null
         CarLifeBridge.markCallbackUnready()
@@ -342,6 +412,17 @@ class CarLifeHostService : Service() {
             runCatching { callback.onCastPrepared(displayId) }
                 .onFailure { CarLifeBridge.log("onCastPrepared 回调失败：${it.message}") }
         }, "carlife-cast-prepared").start()
+    }
+
+    private companion object {
+        /**
+         * Density for the display CarLife lays its car UI out on.
+         *
+         * CarLife derives its dp-based layout from the display it is given; 160
+         * gives it a car-sized canvas rather than this phone's high-density
+         * one. CarWith uses the same value on this head unit.
+         */
+        const val CAST_DISPLAY_DPI = 160
     }
 }
 

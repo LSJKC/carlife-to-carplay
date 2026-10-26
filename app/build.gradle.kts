@@ -45,7 +45,7 @@ android {
         // made installing over an older build fail.
         versionCode = 185
         versionName = "1.2.65"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.65-185-ownership-and-fullscreen\"")
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.65-185-virtual-display\"")
     }
 
     buildFeatures { buildConfig = true }
