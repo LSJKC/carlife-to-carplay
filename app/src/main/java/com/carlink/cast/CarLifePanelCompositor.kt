@@ -604,7 +604,18 @@ internal class CarLifePanelCompositor(
         buffer.clear()
         buffer.put(annexB)
         codec.queueInputBuffer(index, 0, annexB.size, frame.ptsUs, 0)
-        if (frame.keyFrame) requestOutputSync = true
+        /*
+         * CarLife's key frames do not force this encoder to emit one.
+         *
+         * CarLife re-sends an IDR roughly every 650 ms, and mirroring each of
+         * them made this encoder produce a 250-320 KB sync frame at the same
+         * cadence — about 7 Mbps of key frames alone on a 1972x520 canvas,
+         * which saturated the Wi-Fi link and made the car reset the session
+         * after twenty to twenty-five seconds. The encoder already emits an
+         * IDR every KEY_I_FRAME_INTERVAL on its own, and a sync frame is
+         * requested explicitly when the decoder is rebuilt or the car asks
+         * for one, which is all the receiver needs.
+         */
         return true
     }
 
