@@ -369,18 +369,38 @@ internal class CarLifePanelCompositor(
     }
 
     private fun initializeEncoder() {
-        val format = MediaFormat.createVideoFormat(MIME_AVC, outputWidth, outputHeight).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, ENCODER_BIT_RATE)
-            setInteger(MediaFormat.KEY_FRAME_RATE, outputFps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        fun buildFormat(bitrateMode: Int?): MediaFormat =
+            MediaFormat.createVideoFormat(MIME_AVC, outputWidth, outputHeight).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, ENCODER_BIT_RATE)
+                setInteger(MediaFormat.KEY_FRAME_RATE, outputFps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                bitrateMode?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
+            }
+        /*
+         * Constant bitrate, so a key frame cannot blow past the budget.
+         *
+         * Without this the encoder picked VBR (the session log shows
+         * bitrate-mode=1) and produced 430 KB key frames on a 1972x520 canvas
+         * — 3.5 Mbit in a single frame, roughly a second of the link's whole
+         * budget delivered at once. The car buffers what it cannot drain, stops
+         * reading, and resets the control connection twenty to twenty-five
+         * seconds in. CBR keeps every frame inside the requested rate. An
+         * encoder that rejects CBR falls back to its default mode.
+         */
+        val cbr = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+        val codec = MediaCodec.createEncoderByType(MIME_AVC)
+        try {
+            codec.configure(buildFormat(cbr), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        } catch (rejected: IllegalArgumentException) {
+            log("编码器不接受 CBR（${rejected.message}），改用默认码率模式")
+            codec.reset()
+            codec.configure(buildFormat(null), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
-        encoder = MediaCodec.createEncoderByType(MIME_AVC).apply {
-            configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            val input = createInputSurface()
-            start()
-            encoderInputSurface = input
-        }
+        encoder = codec
+        val input = codec.createInputSurface()
+        codec.start()
+        encoderInputSurface = input
     }
 
     private var encoderInputSurface: Surface? = null
