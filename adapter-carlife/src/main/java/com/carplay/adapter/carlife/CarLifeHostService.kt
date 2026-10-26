@@ -123,27 +123,46 @@ class CarLifeHostService : Service() {
                 }
             }
             val manager = getSystemService(DisplayManager::class.java)
-            val display = runCatching {
-                manager?.createVirtualDisplay(
-                    "carlife-cast-display",
-                    width,
-                    height,
-                    dpi,
-                    null,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
-                )
-            }.getOrNull()
-            if (display == null) {
-                CarLifeBridge.log("prepareCast: 创建虚拟屏失败，回退到 displayId=0")
-                return 0
-            }
-            castVirtualDisplay = display
-            castDisplayId = display.display.displayId
-            CarLifeBridge.log(
-                "prepareCast: 已创建虚拟屏 displayId=$castDisplayId ${width}x$height dpi=$dpi；" +
-                    "CarLife 将按这个尺寸布局车机 UI",
+            /*
+             * PUBLIC is what lets another app (CarLife) see the display at all,
+             * but some builds refuse it for a non-system caller. Try the flag
+             * sets in order and report why each one failed — a bare "创建虚拟屏
+             * 失败" leaves no way to tell a permission problem from a bad size.
+             */
+            var lastFailure: Throwable? = null
+            val flags = intArrayOf(
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                0,
             )
-            return castDisplayId
+            for (flag in flags) {
+                val created = runCatching {
+                    manager?.createVirtualDisplay(
+                        "carlife-cast-display",
+                        width,
+                        height,
+                        dpi,
+                        null,
+                        flag,
+                    )
+                }
+                created.getOrNull()?.let { display ->
+                    castVirtualDisplay = display
+                    castDisplayId = display.display.displayId
+                    CarLifeBridge.log(
+                        "prepareCast: 已创建虚拟屏 displayId=$castDisplayId ${width}x$height dpi=$dpi " +
+                            "flags=0x${flag.toString(16)}；CarLife 将按这个尺寸布局车机 UI",
+                    )
+                    return castDisplayId
+                }
+                lastFailure = created.exceptionOrNull() ?: lastFailure
+            }
+            CarLifeBridge.log(
+                "prepareCast: 创建虚拟屏失败（${lastFailure?.javaClass?.simpleName}: ${lastFailure?.message}），" +
+                    "回退到 displayId=0",
+            )
+            return 0
         }
 
         override fun stopCast() {
