@@ -3,7 +3,22 @@ package com.carplay.sender
 /** Ownership derives from requests and notifications; packets being sent are not ownership proof. */
 class SessionModes {
     private data class Resource(var owner: Long = 1, var permanent: Long = 1)
-    private val resources = mutableMapOf(1L to Resource(), 2L to Resource(2,2))
+
+    /**
+     * Initial ownership, taken from what the car declares in /info.
+     *
+     * This head unit's `modes.initialPermanentEntity` is explicit:
+     *
+     *     resourceID 1 (screen) permanentEntity 2   — the car owns the screen
+     *     resourceID 2 (audio)  permanentEntity 1   — the phone owns audio
+     *
+     * Starting from the opposite values told the car that the phone already
+     * owned a screen it had not granted, and that the car owned audio the
+     * phone was about to send. Every ownership snapshot this app posted was
+     * therefore self-contradictory, and the car answered by taking the screen
+     * back and, eventually, resetting the session.
+     */
+    private val resources = mutableMapOf(1L to Resource(2, 2), 2L to Resource(1, 1))
     /** Result of a changeModes request, split by resource so callers cannot reclaim audio on a screen restore. */
     data class Change(
         val reply: Map<String, Any>,

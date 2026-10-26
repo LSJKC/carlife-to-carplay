@@ -158,6 +158,30 @@ object CarPanelGeometry {
          * CUSTOM choose that rectangle; OFF and a rectangle equal to the panel
          * leave the source full-screen.
          */
+        /*
+         * A source that already fills the panel is passed through untouched.
+         *
+         * CarLife encodes the full canvas (see CarLifeSession.encoderInitPayload),
+         * so the picture is already the size and shape the car asked for. The
+         * safe rectangle is a layout hint for the car's own chrome, not a
+         * viewport for this picture: applying it here is what produced the
+         * stretch, the letterbox and the crop in turn. CarWith, which runs this
+         * head unit without dropping the session, ignores viewAreas the same
+         * way.
+         */
+        if (looksLikeFullPanel) {
+            return VideoPlacement(
+                x = 0,
+                y = 0,
+                width = panel.panelWidth,
+                height = panel.panelHeight,
+                layout = VideoLayout.FULL_PANEL,
+                sourceX = 0,
+                sourceY = 0,
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+            )
+        }
         val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
             /*

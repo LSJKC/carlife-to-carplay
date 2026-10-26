@@ -641,13 +641,27 @@ internal class CarLifeSession(
          * encoder, so the size was never the objection. With the audio path
          * fixed, this is the shape to use.
          */
-        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
-        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
+        /*
+         * The canvas the car declared, whatever the safe-area policy says.
+         *
+         * CarWith (carplayB, the Xiaomi build that runs this same head unit
+         * without dropping the session) logs `viewAreas-present=true
+         * viewAreas=1 ... applied=false` and then drives the whole session at
+         * the receiver's own 1972x520. It never encodes the safe rectangle and
+         * never places the picture inside it; the car's own layout already
+         * keeps its controls clear of the panel edges.
+         *
+         * Encoding the safe rectangle instead gives a 1408x476 frame that has
+         * to be stretched (distorted), fitted (letterboxed, small) or cropped
+         * (side rail lost) to fill the panel — three bad answers to a problem
+         * this car does not actually have.
+         */
+        val sourceWidth = area.panelWidth
+        val sourceHeight = area.panelHeight
 
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
-                "CarLife 源=${sourceWidth}x$sourceHeight " +
-                (if (useSafeAreaSource) "(安全区比例)" else "(全画布)") + "，" +
+                "CarLife 源=${sourceWidth}x$sourceHeight (全画布，忽略安全区)，" +
                 "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})",
         )
         return CarLifeProto.videoEncoderInfo(
