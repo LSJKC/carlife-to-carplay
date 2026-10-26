@@ -1,4 +1,5 @@
 package com.carplay.sender
+import android.os.SystemClock
 
 import com.carplay.airplay.*
 import com.carplay.iap2.transport.BlockingDuplexByteStream
@@ -142,6 +143,12 @@ class AirPlaySender(
     /** Set once, so a lost audio grant is reported once instead of per packet. */
     private var audioSuppressed = false
     private var audioPacketsSent = 0L
+
+    /** Last sampleTime the receiver reported for our audio stream, and how often. */
+    @Volatile private var receiverAudioSampleTime: Long = -1L
+    @Volatile private var receiverFeedbackCount = 0L
+    @Volatile private var lastFeedbackReportAt = 0L
+
     @Volatile private var lastAudioTimestamp: Long? = null
     @Volatile private var nextAudioTimestamp: Long? = null
     @Volatile private var audioSyncSequence = 0
@@ -547,7 +554,10 @@ class AirPlaySender(
         // transport also uses it to deliver delayed iAP2 packets. RtspWire's
         // shared reader marks those CSeqs as ignored; keep the payload path
         // alive so Wi-Fi command authentication cannot stall after 0x1d00.
-        wire.onIgnoredResponse = { receiveIapResponse(it,typedOnly = true) }
+        wire.onIgnoredResponse = {
+            recordAudioFeedback(it)
+            receiveIapResponse(it, typedOnly = true)
+        }
         synchronized(iapLock) { openingIap = true }
         val seed = SecureRandom().nextLong().and(Long.MAX_VALUE)
         val iapReply = plist(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(mapOf(
@@ -795,8 +805,19 @@ class AirPlaySender(
                          * ignored feedback responses while SETUP is in
                          * flight. Keep this write non-blocking so a slow
                          * receiver cannot hold the request monitor.
+                         *
+                         * The reply is still read (through the ignored-response
+                         * path) because it is the only evidence the car is
+                         * consuming audio: each entry carries the receiver's
+                         * sampleTime, which stays at zero for a stream the car
+                         * has opened but never plays. Audio started and the
+                         * session died four seconds later in every capture, and
+                         * without this number there is no way to tell a broken
+                         * audio clock from a car that simply will not decode the
+                         * stream.
                          */
                         wire.sendAndForget("POST", "/feedback")
+                        reportAudioFeedback()
                     }
                 } catch (error: Exception) {
                     if (!closed.get()) throw error
@@ -1236,6 +1257,45 @@ class AirPlaySender(
                 }
             }
         }, "carplay-audio-send").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Records the receiver's audio clock from a `/feedback` reply.
+     *
+     * Each entry carries `sampleTime`, the number of samples the car has
+     * actually consumed for that stream. It is the only way to tell a stream
+     * the car accepted from one it opened and never plays: a working stream
+     * advances, a broken one stays at zero. Every capture so far died about
+     * four seconds after audio started, and without this number there was no
+     * way to say whether the car was consuming what we sent.
+     */
+    private fun recordAudioFeedback(message: ControlMessage) {
+        if (message.body.isEmpty()) return
+        val root = runCatching { plist(message.body) }.getOrNull() ?: return
+        val streams = root["streams"] as? List<*> ?: return
+        val ours = selectedAudio?.streamType ?: return
+        streams.forEach { raw ->
+            val entry = raw as? Map<*, *> ?: return@forEach
+            val sampleTime = (entry["sampleTime"] as? Number)?.toLong() ?: return@forEach
+            receiverAudioSampleTime = sampleTime
+            receiverFeedbackCount++
+        }
+        if (reportedCommands.add("feedback:${streams.size}")) {
+            events.diagnostic("车机音频回执：streams=${streams.size}，sampleTime=$receiverAudioSampleTime（本机类型 $ours）")
+        }
+    }
+
+    /** Periodic one-liner so a stalled receiver is visible in the journal. */
+    private fun reportAudioFeedback() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFeedbackReportAt < 5_000) return
+        lastFeedbackReportAt = now
+        if (receiverAudioSampleTime < 0) return
+        val samples = receiverAudioSampleTime
+        val seconds = samples.toDouble() / (selectedAudio?.sampleRate ?: 48_000).toDouble()
+        events.diagnostic(
+            "车机音频进度：sampleTime=$samples（${"%.1f".format(seconds)}s），回执 ${receiverFeedbackCount} 次",
+        )
     }
 
     private fun sendAudioChunk(chunk: AudioChunk) {

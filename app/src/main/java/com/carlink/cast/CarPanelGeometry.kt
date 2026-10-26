@@ -160,11 +160,29 @@ object CarPanelGeometry {
          */
         val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
+            /*
+             * Fit the source into the viewport without changing its shape.
+             *
+             * The canvas and the safe rectangle rarely share an aspect ratio:
+             * this car's panel is 1972x520 (3.79:1) while its safe rectangle is
+             * 1408x476 (2.96:1). Stretching the full frame into the rectangle
+             * squashes CarLife's UI vertically — the driver described it as
+             * 拉长 — so the frame is scaled to fit inside the rectangle and
+             * centred, and the leftover strip stays wallpaper.
+             */
+            val fitted = fitInside(
+                outerX = viewport.first,
+                outerY = viewport.second,
+                outerWidth = viewport.third,
+                outerHeight = viewport.fourth,
+                sourceWidth = sourceWidth,
+                sourceHeight = sourceHeight,
+            )
             return VideoPlacement(
-                x = viewport.first,
-                y = viewport.second,
-                width = viewport.third,
-                height = viewport.fourth,
+                x = fitted.first,
+                y = fitted.second,
+                width = fitted.third,
+                height = fitted.fourth,
                 layout = if (sourceIsSafeArea && viewport ==
                     Quad(panel.safeX, panel.safeY, panel.safeWidth, panel.safeHeight)
                 ) {
@@ -224,6 +242,37 @@ object CarPanelGeometry {
         if (x < 0 || y < 0 || x + width > panel.panelWidth || y + height > panel.panelHeight) return null
         if (x == 0 && y == 0 && width == panel.panelWidth && height == panel.panelHeight) return null
         return Quad(x, y, width, height)
+    }
+
+    /**
+     * Largest rectangle with the source's aspect ratio that fits in the outer
+     * rectangle, centred inside it.
+     *
+     * Scaling a frame into a differently shaped rectangle distorts it; this is
+     * the letterbox that keeps CarLife's UI the shape it was drawn in.
+     */
+    private fun fitInside(
+        outerX: Int,
+        outerY: Int,
+        outerWidth: Int,
+        outerHeight: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): Quad {
+        if (outerWidth <= 0 || outerHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+            return Quad(outerX, outerY, outerWidth, outerHeight)
+        }
+        val widthScale = outerWidth.toDouble() / sourceWidth
+        val heightScale = outerHeight.toDouble() / sourceHeight
+        val scale = minOf(widthScale, heightScale)
+        val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
+        val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
+        return Quad(
+            outerX + (outerWidth - width) / 2,
+            outerY + (outerHeight - height) / 2,
+            width,
+            height,
+        )
     }
 
     private data class Quad(
