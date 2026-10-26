@@ -288,20 +288,27 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                 )
             } else {
                 /*
-                 * A null component means the package is in the "stopped" state.
+                 * A null component means the package is in the "stopped" state,
+                 * and this app deliberately does not fight it.
                  *
-                 * com.hihonor.nearby marks CarLife stopped whenever its own
-                 * car session ends, and Android then refuses every start a
-                 * third-party app issues: startService returns null, no port
-                 * opens, and the session dies with ECONNREFUSED on 7240. Only
-                 * a user-visible launch clears that state — which is exactly
-                 * what "open CarLife once by hand and it connects by itself
-                 * afterwards" is doing. That launch is the only thing this app
-                 * can do about it, so it does it here rather than failing the
-                 * whole session.
+                 * com.hihonor.nearby marks CarLife stopped whenever its own car
+                 * session ends, and Android then refuses every start a
+                 * third-party app issues. Launching CarLife's activity does
+                 * clear that state — but it also makes CarLife bind to THIS app
+                 * as its host, and the surface CarLife then offers is one the
+                 * host is expected to draw into. This app has no car UI, so the
+                 * picture goes black. Every session that showed the real car
+                 * desktop had Honor's launcher as the host; every black one had
+                 * this app as the host.
+                 *
+                 * So the launcher stays the only thing that starts CarLife.
+                 * This session waits for it and only takes the H.264 stream.
                  */
-                observer?.diagnostic("$reason：CarLife 被系统停用，改为启动其主界面以解除限制")
-                wakeCarLifeActivity(context)
+                observer?.diagnostic(
+                    "$reason：CarLife 未运行；请在荣耀车联里完成一次连接（它负责绘制桌面），" +
+                        "本应用只读取它的音视频流",
+                )
+                return false
             }
         }
         return result.isSuccess
