@@ -96,6 +96,9 @@ internal class CarLifePanelCompositor(
     private var requestOutputSync = false
     private var nextOutputPtsUs = 0L
     private var lastWallpaperRevision = Long.MIN_VALUE
+
+    /** Last time the periodic render/encode counters were logged. */
+    private var lastStatsAt = 0L
     private var renderedFrames = 0L
     private var encodedFrames = 0L
     private var firstOutputFormatLogged = false
@@ -374,6 +377,20 @@ internal class CarLifePanelCompositor(
                 }
                 val intervalNanos = frameIntervalUs() * 1_000L
                 nextRenderAt = if (now - nextRenderAt > intervalNanos) now + intervalNanos else nextRenderAt + intervalNanos
+                /*
+                 * Periodic counters. The driver saw "0.1 fps, session alive,
+                 * no picture", which can mean the loop is stalled, the decoder
+                 * is starved, or the encoder is not draining — three very
+                 * different faults that look identical from the outside.
+                 */
+                if (now - lastStatsAt >= 5_000_000_000L) {
+                    lastStatsAt = now
+                    val queued = synchronized(lock) { frames.size }
+                    log(
+                        "全画布统计：渲染=$renderedFrames 编码=$encodedFrames " +
+                            "输入队列=$queued 丢输入=$droppedInputFrames 有画面=$videoHasFrame",
+                    )
+                }
             } else {
                 synchronized(lock) {
                     val waitMs = ((nextRenderAt - now) / 1_000_000L).coerceIn(1L, 5L)

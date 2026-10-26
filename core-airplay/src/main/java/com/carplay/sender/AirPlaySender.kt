@@ -640,9 +640,23 @@ class AirPlaySender(
         }
         // The reference Buick-E5 flow declares ownership before screen SETUP,
         // prepares the source, then starts its encoder only after RECORD.
-        if (enableAudio) setAudioOwnership(true)
+        //
+        // The screen has to be claimed, not assumed. This car's /info starts
+        // with the screen owned by the head unit (initialPermanentEntity 2), so
+        // a snapshot that leaves it there is telling the car the phone does not
+        // want to display — and the video worker drops every frame while
+        // ownsScreen() is false. Claiming here is what makes the picture appear
+        // at all; the car can still take the screen back later through
+        // changeModes, which is handled separately.
+        if (modes.claimScreen()) {
+            events.diagnostic("会话开始：已申请屏幕资源由手机显示")
+        }
+        if (enableAudio && !modes.ownsAudio()) setAudioOwnership(true)
         wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
-        events.diagnostic("初始资源所有权已声明（屏幕${if (enableAudio) "+音频" else ""}）")
+        events.diagnostic(
+            "初始资源所有权已声明：屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
+                "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
+        )
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
         // MIB3 screen SETUP shape: latencyMs, uuid, displayWidth/displayHeight.
