@@ -645,31 +645,40 @@ class AirPlaySender(
         }
         synchronized(iapLock) { openingIap = true }
         val seed = SecureRandom().nextLong().and(Long.MAX_VALUE)
-        val iapReply = plist(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(mapOf(
-                "type" to 130, "clientTypeUUID" to IAP_DATASTREAM_UUID,
-                "seed" to seed, "streamConnectionID" to seed,
-            )))), plistHeaders).body)
+        /*
+         * No type-130 SETUP. The reference sender never sends one here, and
+         * says why in its own trace:
+         *
+         *   Runtime type130 skipped: vendor compatibility profile; SETUP
+         *   rejects types outside 100..111 and may tear down session
+         *
+         * This car answers our 130 with a 200 and an empty body, which looks
+         * like acceptance but is not: measured from RECORD, the control
+         * connection is destroyed 13.09-13.16 s later in every single capture.
+         * The reference sender, which skips 130 entirely, keeps the same
+         * session alive for 110 s.
+         *
+         * Its SETUP sequence on this car is exactly one screen stream:
+         *
+         *   SETUP streams=[{type:110, ...}]  (+ optional 101/100 audio later)
+         *
+         * so the iAP2 control link stays on the authenticated Bluetooth
+         * connection and the Wi-Fi command channel is only used for the
+         * car's own markers.
+         */
+        val iapReply: Map<*, *> = emptyMap<Any, Any>()
         val transport = synchronized(iapLock) {
             val selectedTransport = SenderNegotiation.control(iapReply)
             if (selectedTransport.kind == SenderControlKind.AUTHENTICATED_BLUETOOTH) {
                 /*
-                 * The car rejects type 130 on every session (its reply has no
-                 * 130 stream at all), so this branch is the normal one here.
+                 * Always the case now: no type-130 SETUP is sent at all, so
+                 * there is no reply to negotiate from. Control stays on the
+                 * authenticated Bluetooth link, exactly as the reference
+                 * sender does on this car.
                  *
-                 * 1.2.58 read the empty reply plus the missing `iAPChannel`
-                 * feature as "this car has no iAP2 on the command channel" and
-                 * kept control on Bluetooth. That was wrong: the car runs a
-                 * complete iAP2 link over `POST /command` — authentication,
-                 * identification with 47 parameters, then real control traffic
-                 * (0x4154/0x4157/0x4170/0x4C01/0x5000/0x6800) for the whole
-                 * session. The only thing that was broken was our bootstrap
-                 * order, which [PhoneBootstrap] now runs authentication-first
-                 * for [PhoneBootstrapPurpose.CONTROL_SESSION].
-                 *
-                 * Control therefore stays on the authenticated Bluetooth link,
-                 * and [ensureCommandIap] attaches the command-channel link from
-                 * the first marker the car sends. Both links answer; the marker
-                 * watchdog is what keeps the session alive.
+                 * [ensureCommandIap] can still attach a command-channel link
+                 * from a marker the car sends; that path is gated on the car
+                 * advertising iAPChannel, which this one never does.
                  */
                 if (earlyIap.isNotEmpty()) {
                     events.diagnostic(
@@ -682,7 +691,7 @@ class AirPlaySender(
                 selectedTransport
             }
         }
-        events.diagnostic("type 130 协商结果：${transport.kind}，回复字段数=${iapReply.size}")
+        events.diagnostic("控制通道：${transport.kind}（未发送 type 130 SETUP）")
         commandModes = transport.kind != SenderControlKind.WIFI_DATASTREAM
         val tunnel = when (transport.kind) {
             SenderControlKind.WIFI_DATASTREAM -> own(PhoneIapTunnel(own(connect(checkNotNull(transport.port))).apply { tcpNoDelay = true },
