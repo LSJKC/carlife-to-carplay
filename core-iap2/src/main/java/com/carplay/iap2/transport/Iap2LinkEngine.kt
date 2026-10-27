@@ -434,13 +434,41 @@ class Iap2LinkEngine(
                 return
             }
             if (config.negotiateControlSession && state == State.NORMAL) {
+                /*
+                 * A SYN in the middle of an active session restarts the link.
+                 *
+                 * This used to `die()` whenever the payload or sequence
+                 * differed from the one negotiated at startup, and that single
+                 * call is what tore down every field session:
+                 *
+                 *     16618 iAP2 RX [phone-command] FAILED: peer changed iAP2
+                 *           synchronization during an active session
+                 *     19473 AirPlay 会话异常：SocketException: Connection reset
+                 *
+                 * The car restarts its iAP2 link about 7.5 s in. The reference
+                 * sender answers that with a full `link-restart` — clear the
+                 * queues, drop the old authentication, negotiate again, then
+                 * replay the whole 0xAA00 → 0x1D01 bootstrap — and stays up for
+                 * 110 s on the same car.
+                 *
+                 * Only an identical replayed handshake ACK is a no-op; anything
+                 * else is a real restart.
+                 */
                 val repeated = SynchronizationPayload.decode(payload ?: ByteArray(0))
-                if (repeated != peerSynchronization || header.sequence != peerSynchronizationSequence) {
-                    die("peer changed iAP2 synchronization during an active session")
+                if (repeated != null && repeated == peerSynchronization &&
+                    header.sequence == peerSynchronizationSequence
+                ) {
+                    if ((header.control and CONTROL_ACKNOWLEDGEMENT) != 0 && confirmsLocalSynchronization) {
+                        sendAcknowledgement()
+                    }
+                    // A replayed handshake ACK must not replace a newer data acknowledgement.
                     return
                 }
-                if ((header.control and CONTROL_ACKNOWLEDGEMENT) != 0 && confirmsLocalSynchronization) sendAcknowledgement()
-                // A replayed handshake ACK must not replace a newer data acknowledgement.
+                if (repeated != null) {
+                    restartLink(repeated, header.sequence, nowMillis, confirmsLocalSynchronization)
+                    return
+                }
+                die("peer iAP2 synchronization payload is undecodable")
                 return
             }
             SynchronizationPayload.decode(payload ?: ByteArray(0))?.let {
