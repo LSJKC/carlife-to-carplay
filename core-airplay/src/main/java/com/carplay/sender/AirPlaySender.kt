@@ -1221,30 +1221,49 @@ class AirPlaySender(
                 "outputBufferSamples=${if (format.isPcm) PCM_OUTPUT_BUFFER_SAMPLES else AAC_OUTPUT_BUFFER_SAMPLES} " +
                 "streamConnectionID=$responseSeed",
         )
+        /*
+         * Do not send RTP↔NTP sync packets.
+         *
+         * Every session logged this, never once successfully:
+         *
+         *     16029 音频同步包暂时发不出去（第 1 次）：sendto failed:
+         *           ECONNREFUSED (Connection refused)；继续重试
+         *
+         * The car hands back a controlPort in the audio SETUP reply but never
+         * listens on it here, so the connected UDP socket draws ICMP port
+         * unreachable on every attempt. The reference sender never sends these
+         * on this car at all — its audio SETUP reply carries no controlPort
+         * and its trace has no sync traffic.
+         *
+         * A datagram stream to a closed port during the receiver's watchdog
+         * window is pure downside: no anchoring effect, and one more thing the
+         * connection can be reset over.
+         */
         if (controlPort in 1..65535) {
-            startAudioSync(address, controlPort, format)
+            events.diagnostic(
+                "车机回包带 controlPort=$controlPort，但本实现不发送 RTP↔NTP 同步包" +
+                    "（参考实现在本车也无法送达，持续 ECONNREFUSED）",
+            )
         } else {
             events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
         }
         /*
-         * Bring up the companion stream.
+         * Do NOT open the companion stream on this transport.
          *
-         * The iPhone on this car runs two streams at once, and the sysdiagnose
-         * names both:
+         * 1.2.76 started one unconditionally and every session paid for it:
          *
-         *   AudioMain  MainHighAudio/media, AAC, 48000 Hz, Stereo, 1024 spf
-         *   AudioAlt   AltAudio/default,  Opus, 48000 Hz, Mono,     960 spf
+         *     6616 第二条音频流 SETUP 失败：车机拒绝 SETUP /：400
          *
-         * The car reports a growing `sampleTime` for BOTH in its /feedback
-         * reply, so this is not a main/backup pair — the head unit really does
-         * consume both. Each stream needs its own SETUP, dataPort and
-         * encryption key; they cannot share one.
+         * The car answers 400 to a second audio SETUP in the same session. The
+         * iPhone's second stream exists (AudioAlt, Opus) but its trace shows it
+         * brought up LATER and torn down after ~1.2 s — it is a separate
+         * session-scoped stream, not a second SETUP appended to ours.
          *
-         * Earlier builds only opened the companion for LPCM mains, which meant
-         * the AAC path — the one this car actually negotiates — never had a
-         * second stream at all.
+         * Sending it costs a rejected SETUP mid-session, and a 400 during the
+         * screen stream's watchdog window is exactly the kind of traffic the
+         * receiver resets a connection over. Leave it out until the reference
+         * sender's timing can be reproduced properly.
          */
-        setupCompanionAudio(wire, format, shared, address)
     }
 
     /**
@@ -2081,7 +2100,8 @@ class AirPlaySender(
         val tunnel = iap?.diagnosticSummary() ?: "iAP2通道=未建立"
         val owns = "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
             "音频=${if (modes.ownsAudio()) "手机" else "车机"}"
-        return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback $owns $tunnel"
+        return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback " +
+            "$owns $tunnel"
     }
 
     override fun close() {
