@@ -161,38 +161,34 @@ object CarPanelGeometry {
         val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
             /*
-             * Fill the viewport by growing into the panel's margins.
+             * Fit the whole frame inside the safe rectangle, keeping its shape.
              *
-             * Source 1972x520 (3.79:1) into a 1408x476 (2.96:1) viewport:
-             * fitting inside keeps every control but only fills 371 of the 476
-             * rows — the driver sees an empty strip along the bottom. Stretching
-             * squashes the UI and cropping to the viewport's shape cuts the side
-             * rail off. Neither is acceptable.
+             * Source 1972x520 (3.79:1) into a 1408x476 (2.96:1) viewport.
+             * The previous code grew to `coverInside` so the picture filled the
+             * viewport vertically at 1805x476 — wider than the rectangle and
+             * clipped by it. On the road that reads as "squashed and cut off",
+             * which is exactly the complaint. Stretching to the viewport's
+             * shape is worse.
              *
-             * Growing to fill means scaling by the larger ratio: 476/520 gives
-             * 1804x476, which is wider than the viewport but still inside the
-             * 1972-pixel panel. The extra width lands in the panel's own side
-             * margins — the strips the car already treats as unsafe — so the
-             * picture fills the viewport vertically, keeps its shape, keeps
-             * every control, and only reaches under the car's edge overlays the
-             * way a real iPhone's picture does. Where that overflow would leave
-             * the panel it is clamped and the GL viewport clips it.
+             * Fitting by the smaller ratio keeps the aspect ratio exactly:
+             * 1408/1972 = 0.714, 476/520 = 0.915, so the scale is 0.714 and the
+             * frame becomes 1408x371, centred in the rectangle. Every control
+             * stays visible and nothing is distorted; what is left over is
+             * wallpaper above and below, inside the safe area.
              */
-            val filled = coverInside(
+            val fitted = fitInside(
                 outerX = viewport.first,
                 outerY = viewport.second,
                 outerWidth = viewport.third,
                 outerHeight = viewport.fourth,
                 sourceWidth = sourceWidth,
                 sourceHeight = sourceHeight,
-                panelWidth = panel.panelWidth,
-                panelHeight = panel.panelHeight,
             )
             return VideoPlacement(
-                x = filled.first,
-                y = filled.second,
-                width = filled.third,
-                height = filled.fourth,
+                x = fitted.first,
+                y = fitted.second,
+                width = fitted.third,
+                height = fitted.fourth,
                 layout = if (sourceIsSafeArea && viewport ==
                     Quad(panel.safeX, panel.safeY, panel.safeWidth, panel.safeHeight)
                 ) {
@@ -262,6 +258,35 @@ object CarPanelGeometry {
      * allowed to be bigger than the outer one, and the panel bounds decide how
      * far that is allowed to go.
      */
+    /**
+     * Scales the whole source frame into [outerWidth] x [outerHeight],
+     * preserving its aspect ratio, and centres it.
+     *
+     * Uses the smaller of the two ratios, so the result always fits: nothing
+     * is cropped, nothing is stretched, and the leftover space is wallpaper.
+     */
+    private fun fitInside(
+        outerX: Int,
+        outerY: Int,
+        outerWidth: Int,
+        outerHeight: Int,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): Quad {
+        if (outerWidth <= 0 || outerHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+            return Quad(outerX, outerY, outerWidth, outerHeight)
+        }
+        val scale = minOf(
+            outerWidth.toDouble() / sourceWidth,
+            outerHeight.toDouble() / sourceHeight,
+        )
+        val width = (sourceWidth * scale).toInt().coerceIn(1, outerWidth)
+        val height = (sourceHeight * scale).toInt().coerceIn(1, outerHeight)
+        val x = outerX + (outerWidth - width) / 2
+        val y = outerY + (outerHeight - height) / 2
+        return Quad(x, y, width, height)
+    }
+
     private fun coverInside(
         outerX: Int,
         outerY: Int,

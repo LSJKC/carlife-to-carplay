@@ -122,11 +122,15 @@ class CarPanelGeometryTest {
             panel,
             CarPanelGeometry.SafeAreaPolicy(enabled = true),
         )
-        assertEquals(CarPanelGeometry.VideoLayout.FULL_PANEL, placement.layout)
-        assertEquals(0, placement.x)
-        assertEquals(0, placement.y)
-        assertEquals(1972, placement.width)
-        assertEquals(520, placement.height)
+        // The whole frame is kept and scaled into the safe rectangle at its
+        // own aspect ratio: 1972x520 (3.79:1) into 1408x476 (2.96:1) fits by
+        // width, giving 1408x371 centred vertically inside the rectangle.
+        // Nothing is cropped and nothing is stretched.
+        assertEquals(CarPanelGeometry.VideoLayout.SAFE_VIEWPORT, placement.layout)
+        assertEquals(278, placement.x)
+        assertEquals(44 + (476 - 371) / 2, placement.y)
+        assertEquals(1408, placement.width)
+        assertEquals(371, placement.height)
         assertEquals(0, placement.sourceX)
         assertEquals(0, placement.sourceY)
         assertEquals(1972, placement.sourceWidth)
@@ -147,11 +151,14 @@ class CarPanelGeometryTest {
                 mode = CarPanelGeometry.SafeAreaMode.RELAXED,
             ),
         )
-        assertEquals(CarPanelGeometry.VideoLayout.FULL_PANEL, placement.layout)
-        assertEquals(0, placement.x)
-        assertEquals(0, placement.y)
-        assertEquals(1972, placement.width)
-        assertEquals(520, placement.height)
+        // Same rule as STRICT: the full frame is kept and fitted into the safe
+        // rectangle at its own aspect ratio, so no control is cropped and the
+        // UI is not stretched.
+        assertEquals(CarPanelGeometry.VideoLayout.SAFE_VIEWPORT, placement.layout)
+        // RELAXED uses a wider rectangle than STRICT; the frame still keeps its
+        // aspect ratio, so 1972x520 fitted into that width gives this height.
+        assertEquals(1690, placement.width)
+        assertEquals((520.0 * 1690 / 1972).toInt(), placement.height)
         assertEquals(0, placement.sourceX)
         assertEquals(0, placement.sourceY)
         assertEquals(1972, placement.sourceWidth)

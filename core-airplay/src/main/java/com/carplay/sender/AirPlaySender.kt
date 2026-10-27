@@ -1842,8 +1842,18 @@ class AirPlaySender(
                  * Control stays on the authenticated Bluetooth link, and the
                  * markers are acknowledged with 200.
                  */
+                /*
+                 * Attach the command-channel link on the car's first marker,
+                 * whether or not it advertises iAPChannel.
+                 *
+                 * This car never lists iAPChannel, so the 1.2.78 gate kept the
+                 * link from being built at all — and with no link there is
+                 * nothing to echo the marker on, which is why 1.2.80's echo fix
+                 * never ran. The marker echo in Iap2LinkEngine is what keeps
+                 * the session alive.
+                 */
                 val forwarded = receiveIap(data) ||
-                    (carEnablesIapChannel && ensureCommandIap()?.offer(data) == true)
+                    (ensureCommandIap()?.offer(data) == true)
                 val description = describeIapMessage(data)
                 if (!forwarded && reportedCommands.add("iAP:$description")) {
                     events.diagnostic(

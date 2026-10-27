@@ -145,6 +145,8 @@ class Iap2LinkEngine(
     private var awaitingPayload: Header? = null
 
     private var markerDeadlineMillis: Long? = null
+    /** Detection markers echoed back while the link is up; diagnostics only. */
+    private var markerEchoes = 0L
     private var synchronizationDeadlineMillis: Long? = null
     private var sendAcknowledgementDeadlineMillis: Long? = null
     private var receiveAcknowledgementDeadlineMillis: Long? = null
@@ -343,6 +345,8 @@ class Iap2LinkEngine(
                          */
                         receive.discard(IAP2_MARKER.size)
                         if (!appendOutput(IAP2_MARKER)) return false
+                        markerEchoes += 1
+                        reportPacket("MARKER-ECHOED", Header(9, CONTROL_ACKNOWLEDGEMENT, 0, 0, 0))
                         discarded = true
                         continue
                     }
