@@ -409,6 +409,10 @@ internal class AirPlayLink(
 
         override fun iapControl(stream: BlockingDuplexByteStream): CompletableFuture<Unit> {
             val done = CompletableFuture<Unit>()
+            // Set by the link layer when the car restarts its iAP2 link under
+            // us; the bootstrap below then replays from 0xAA00.
+            val linkRestarted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val restartSignal = java.util.concurrent.CountDownLatch(1)
             Thread({
                 try {
                     // The Wi-Fi command channel carries a link the car opened
@@ -419,6 +423,15 @@ internal class AirPlayLink(
                             stream,
                             onTrace = { log("iAP2：$it") },
                             onFileTransferDatagram = { datagram -> nowPlaying.onFileTransferDatagram(datagram) },
+                            onLinkRestart = {
+                                // The car restarted its iAP2 link under us. The
+                                // session above believes it is still ready; tell
+                                // it to replay the whole bootstrap, or nothing
+                                // will ever speak on the new link.
+                                log("车机重启了 iAP2 链路：重新执行引导")
+                                linkRestarted.set(true)
+                                restartSignal.countDown()
+                            },
                         )
                     } else {
                         Iap2Session.controllerTunnel(stream)
@@ -469,6 +482,21 @@ internal class AirPlayLink(
                                     "identified=${stage.identified} authenticated=${stage.authenticated} " +
                                     "certificate=${stage.certificateReceived}",
                             )
+                        }
+                        /*
+                         * The car restarted its iAP2 link. Replay the whole
+                         * bootstrap: authentication, identification and the
+                         * handlers all belonged to the old link. Without this
+                         * the new link comes up and stays silent — measured on
+                         * 1.2.91, LINK-RESTART at 24130 ms, no 0xAA00 after it,
+                         * connection reset 2.9 s later.
+                         */
+                        if (linkRestarted.compareAndSet(true, false)) {
+                            log("重新执行 iAP2 引导：认证 → 识别")
+                            control.restartForNewLink()
+                            identifyRetries = 0
+                            nextIdentifyRetry = System.nanoTime()
+                            control.begin()
                         }
                         val frame = runtime.recv(1000) ?: continue
                         control.receive(frame)

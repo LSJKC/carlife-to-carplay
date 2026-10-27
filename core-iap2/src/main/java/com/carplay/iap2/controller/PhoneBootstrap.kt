@@ -139,6 +139,33 @@ class PhoneBootstrap(
      */
     fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
 
+    /**
+     * Clears everything negotiated on a link the car has just replaced.
+     *
+     * The link layer restarts underneath us when the car sends a fresh SYN
+     * mid-session. Everything learned from the old link — the certificate, the
+     * challenge, identification, the capability lists, the readiness flags —
+     * belongs to that link and is worthless on the new one. The reference
+     * sender replays the full bootstrap after a restart
+     * (0xAA00 -> 0xAA01 -> 0xAA03 -> 0xAA05 -> 0x1D00 -> 0x1D01), and doing
+     * the same is what keeps its session alive for 110 s on this car.
+     */
+    @Synchronized fun restartForNewLink() {
+        identified = false
+        authenticated = false
+        published = false
+        networkRequestQueued = false
+        controlReady = false
+        versionInfo = null
+        leaf = null
+        challenge = null
+        supportsStart = false
+        accessoryReceives = emptySet()
+        accessorySends = emptySet()
+        identification = null
+        lastReportedStatus = null
+    }
+
 
     @Synchronized fun status() = BootstrapStatus(identified, authenticated, leaf != null, challenge != null, endpoint != null,
         networkRequestQueued, supportsStart, controlReady)

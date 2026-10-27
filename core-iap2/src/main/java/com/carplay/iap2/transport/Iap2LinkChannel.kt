@@ -543,10 +543,11 @@ class Iap2LinkChannel private constructor(
          * initiator role and leaving the marker unanswered.
          */
         fun openCommandTunnel(underlying: BlockingDuplexByteStream, onDiagnostic: (String) -> Unit = {},
-            onFileTransferDatagram: (ByteArray) -> Unit = {}): Iap2LinkChannel =
+            onFileTransferDatagram: (ByteArray) -> Unit = {},
+            onLinkRestart: (() -> Unit)? = null): Iap2LinkChannel =
             Iap2LinkChannel(
                 underlying,
-                PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig(),
+                PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig().copy(onLinkRestart = onLinkRestart),
                 initiateNegotiation = false, {}, onFileTransferDatagram, onDiagnostic, packetDiagnostics = true,
             ).also { it.worker.start() }
 

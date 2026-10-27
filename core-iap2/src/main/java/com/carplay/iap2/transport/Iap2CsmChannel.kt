@@ -264,8 +264,10 @@ class Iap2CsmChannel private constructor(
 
         /** iAP2 over the AirPlay Wi-Fi command channel; the accessory starts the link. */
         fun openCommandTunnel(underlying: BlockingDuplexByteStream, onDiagnostic: (String) -> Unit = {},
-            onFileTransferDatagram: (ByteArray) -> Unit = {}): Iap2CsmChannel =
-            Iap2CsmChannel(Iap2LinkChannel.openCommandTunnel(underlying, onDiagnostic, onFileTransferDatagram))
+            onFileTransferDatagram: (ByteArray) -> Unit = {},
+            onLinkRestart: (() -> Unit)? = null): Iap2CsmChannel =
+            Iap2CsmChannel(Iap2LinkChannel.openCommandTunnel(
+                underlying, onDiagnostic, onFileTransferDatagram, onLinkRestart))
 
         private const val MAX_PENDING_FRAMES = 64
         private const val MAX_PENDING_FRAME_BYTES = 1_048_576

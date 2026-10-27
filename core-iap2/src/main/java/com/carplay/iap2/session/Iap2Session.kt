@@ -186,9 +186,10 @@ class Iap2Session private constructor(
             underlying: BlockingDuplexByteStream,
             onTrace: (String) -> Unit = {},
             onFileTransferDatagram: (ByteArray) -> Unit = {},
+            onLinkRestart: (() -> Unit)? = null,
         ): Iap2Session = Iap2Session(
             Iap2CsmChannel.openCommandTunnel(underlying,
-                { onTrace("IAP2 LINK [phone-command] $it") }, onFileTransferDatagram),
+                { onTrace("IAP2 LINK [phone-command] $it") }, onFileTransferDatagram, onLinkRestart),
             "phone-command", onTrace,
         )
 

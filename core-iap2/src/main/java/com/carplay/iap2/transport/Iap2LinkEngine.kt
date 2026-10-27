@@ -546,6 +546,17 @@ class Iap2LinkEngine(
         sendSynchronization()
         synchronizationDeadlineMillis = nowMillis + SYNCHRONIZATION_RESEND_MILLIS
         if (confirmsLocalSynchronization) sendAcknowledgement()
+        /*
+         * Tell the session above us.
+         *
+         * Everything negotiated on the old link is gone: the iAP2 session's
+         * authentication, its identification and every CSM handler it
+         * installed. Without this call the link comes back up and then nobody
+         * speaks on it — measured on 1.2.91, where LINK-RESTART fired at
+         * 24130 ms and no 0xAA00 ever followed, with the car resetting the
+         * connection 2.9 s later.
+         */
+        runCatching { config.onLinkRestart?.invoke() }
     }
 
     private fun handleSynchronization(sync: SynchronizationPayload, sequence: Int, nowMillis: Long,
@@ -986,6 +997,15 @@ data class Iap2LinkConfig(
     val ignoreRepeatedDetectionMarker: Boolean = false,
     /** Optional phone send limit; never replaces the peer's negotiated synchronization fields. */
     val maximumInFlightPackets: Int? = null,
+    /**
+     * Called when the peer restarts the link under us.
+     *
+     * The link layer can only clear its own queues; the iAP2 session above it
+     * (authentication, identification, the CSM handlers) still believes it is
+     * ready and will never speak again on the new link. The reference sender
+     * replays the whole bootstrap after a restart, so the owner has to be told.
+     */
+    val onLinkRestart: (() -> Unit)? = null,
 ) {
     init {
         require(maxOutgoing in 0..0xff)
