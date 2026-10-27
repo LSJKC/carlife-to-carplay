@@ -124,22 +124,21 @@ class PhoneBootstrap(
      * correctly, and the car has been tearing the session down about thirteen
      * seconds after its first command-channel link marker ever since.
      */
-    fun begin() {
-        when {
-            authenticated && !identified -> { onStage("识别车机"); send(empty(0x1d00)) }
-            !authenticated && authenticatesFirst -> {
-                // Re-sending 0xAA00 while a challenge is already in flight would
-                // restart the exchange the car is midway through.
-                if (leaf == null) { onStage("验证车机身份"); send(empty(0xaa00)) }
-            }
-            !identified -> { onStage("识别车机"); send(empty(0x1d00)) }
-        }
-        reportStatus()
-    }
+    /**
+     * Starts (or resumes) the bootstrap.
+     *
+     * Identification-first. 1.2.75 briefly made the Wi-Fi command channel
+     * authentication-first to match the reference sender, on the theory that
+     * this car ignores 0x1D00 until 0xAA05. The 1.2.77 field logs disprove
+     * that: the link reaches READY, we send 0xAA00, the car acknowledges the
+     * frame at the link layer — and then never sends 0xAA01, for the whole
+     * session, on all three captures. It answers neither order. That is a
+     * firmware policy on this head unit, not a sequencing mistake, so the
+     * channel stays disabled (see AirPlaySender.carEnablesIapChannel) and this
+     * method keeps the order the Bluetooth link needs.
+     */
+    fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
 
-    /** True when this transport authenticates before it identifies. */
-    private val authenticatesFirst: Boolean
-        get() = purpose == PhoneBootstrapPurpose.CONTROL_SESSION
 
     @Synchronized fun status() = BootstrapStatus(identified, authenticated, leaf != null, challenge != null, endpoint != null,
         networkRequestQueued, supportsStart, controlReady)
@@ -159,7 +158,22 @@ class PhoneBootstrap(
         val body = Iap2BodyReader.of(frame)
         when (frame.messageId) {
             0x1d01 -> {
-                check(!identified) { "收到重复识别信息" }
+                /*
+                 * A repeated identification is a retry, not an error.
+                 *
+                 * The receiver resends 0x1D01 when it did not see our 0x1D02,
+                 * and it sends a fresh one when it reopens the link mid-session
+                 * (the reference sender's capture shows two complete rounds).
+                 * The old `check(!identified)` threw on the second one and took
+                 * the control connection down; answering 0x1D02 again is what
+                 * makes the retry stop.
+                 */
+                if (identified) {
+                    body.string(0); body.string(1); body.string(2)
+                    send(empty(0x1d02))
+                    reportStatus()
+                    return
+                }
                 body.string(0); body.string(1); body.string(2)
                 expectedAccessoryIdentity?.let { expected ->
                     check(MessageDigest.isEqual(expected, identityFingerprint(body))) { "重新协商时车机身份信息已变化" }
@@ -201,29 +215,51 @@ class PhoneBootstrap(
                 onStage("车机请求认证")
             }
             0xaa01 -> {
-                check(leaf == null) { "认证证书时序错误" }
-                // Identification-first transports have already identified by
-                // the time the certificate arrives; the command channel has
-                // not, and requiring it here is what made every command-tunnel
-                // session die in 1.2.32–1.2.57.
-                check(identified || authenticatesFirst) { "识别完成前收到认证证书" }
+                /*
+                 * A repeated certificate is not an error.
+                 *
+                 * A receiver that resends 0xAA01 (a retry after our challenge
+                 * was lost, or a fresh round after it reopened the link) used to
+                 * trip `check(leaf == null)` and kill the whole bootstrap, which
+                 * takes the control connection down with it. Answering the
+                 * repeat with a fresh challenge is what the exchange expects.
+                 */
+                check(identified || purpose == PhoneBootstrapPurpose.CONTROL_SESSION) {
+                    "识别完成前收到认证证书"
+                }
                 val trusted = validateCertificates(body.bytes(0))
                 leaf = trusted
                 challenge = ByteArray(if (trusted.publicKey is ECPublicKey) 32 else 20).also(SecureRandom()::nextBytes)
                 send(Iap2Messages.buildRaw(0xaa02) { bytes(0, challenge!!) })
             }
             0xaa03 -> {
-                check(!authenticated) { "重复认证响应" }
-                val certificate = checkNotNull(leaf) { "未请求的认证响应" }
-                val nonce = checkNotNull(challenge) { "认证挑战不存在" }
-                if (!verifyChallenge(certificate, nonce, body.bytes(0))) {
-                    send(empty(0xaa04)); error("车机认证签名无效")
+                /*
+                 * A repeated signature is a retry, not a protocol violation.
+                 *
+                 * The old `check(!authenticated)` threw on the second 0xAA03,
+                 * which a receiver sends when it did not see our 0xAA05. The
+                 * throw killed the bootstrap thread and with it the control
+                 * connection. Re-verifying is cheap and idempotent: the same
+                 * signature over the same challenge verifies again.
+                 */
+                val certificate = leaf
+                val nonce = challenge
+                if (certificate == null || nonce == null) {
+                    // Already authenticated and the challenge was cleared: this
+                    // is a duplicate arriving after completion. Acknowledge it
+                    // again so the receiver stops retrying.
+                    if (authenticated) { send(empty(0xaa05)) }
+                    else error("未请求的认证响应")
+                } else {
+                    if (!verifyChallenge(certificate, nonce, body.bytes(0))) {
+                        send(empty(0xaa04)); error("车机认证签名无效")
+                    }
+                    authenticated = true; challenge = null; send(empty(0xaa05))
+                    // On the command channel authentication comes first, so the
+                    // identification request is due now — and only now.
+                    if (!identified) { onStage("识别车机"); send(empty(0x1d00)) }
+                    else publish()
                 }
-                authenticated = true; challenge = null; send(empty(0xaa05))
-                // On the command channel authentication comes first, so the
-                // identification request is due now — and only now.
-                if (!identified) { onStage("识别车机"); send(empty(0x1d00)) }
-                else publish()
             }
             0x4301, 0x5703 -> {
                 check(identified && authenticated) { "认证完成前收到网络配置" }

@@ -203,6 +203,9 @@ class AirPlaySender(
     private var commandModes = false
     private var selectedAudio: SenderAudioFormat? = null
 
+    /** The /info reply, kept so the companion SETUP can echo what this car declared. */
+    @Volatile private var sessionInfo: Map<*, *> = emptyMap<Any, Any>()
+
     @Volatile private var audioProfileStable = false
     @Volatile private var audioProfileSetupComplete = false
     private val iapLock = Any()
@@ -451,6 +454,7 @@ class AirPlaySender(
             startAirPlayKeepAlive(socket.inetAddress, it)
         }
         val info = plist(wire.request("GET", "/info").body)
+        sessionInfo = info
         (info["hidDevices"] as? List<*>)?.forEach { entry ->
             val device = entry as? Map<*, *> ?: return@forEach
             val uuid = device["uuid"] as? String ?: return@forEach
@@ -1045,7 +1049,8 @@ class AirPlaySender(
          */
         fun descriptor(streamType: Int, audioFormat: Long, legacy: Boolean, audioType: String = "media"): Map<String, Any> = linkedMapOf<String, Any>().apply {
             if (legacy) {
-                // Shape B — the explicit form.
+                // Shape B — the explicit form. Kept as the fallback for
+                // receivers that want `supportsRTPPacketRedundancy`.
                 put("type", streamType)
                 put("streamConnectionID", id)
                 put("audioFormat", audioFormat)
@@ -1058,13 +1063,30 @@ class AirPlaySender(
                 put("ct", if (format.isPcm) 1 else 4)
                 put("sr", format.sampleRate)
             } else {
-                // Shape A — exactly the keys the iPhone sends on this car.
-                put("controlPort", local.localPort)
-                put("spf", format.samplesPerPacket)
-                put("audioFormat", audioFormat)
-                put("supportsHighAccuracyTimestamps", true)
+                /*
+                 * Shape A — the reference sender's body on this car, verbatim.
+                 *
+                 * Its audio SETUP on the E2LB is exactly nine keys:
+                 *
+                 *     type, audioType, audioFormat, streamConnectionID,
+                 *     audioLatencyMs, spf, sr, ct, input
+                 *
+                 * Note what is NOT there: no `controlPort`, and no
+                 * `supportsRTPPacketRedundancy`. The earlier shape A carried
+                 * controlPort and omitted type/streamConnectionID/ct/sr, and
+                 * this car answered it with an empty 42-byte body — the SETUP
+                 * was rejected and the code fell back to shape B on every
+                 * session. The reference sender needs no fallback.
+                 */
+                put("type", streamType)
                 put("audioType", audioType)
+                put("audioFormat", audioFormat)
+                put("streamConnectionID", id)
                 put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
+                put("spf", format.samplesPerPacket)
+                put("sr", format.sampleRate)
+                put("ct", if (format.isPcm) 1 else 4)
+                put("input", false)
             }
         }
 
@@ -1202,10 +1224,41 @@ class AirPlaySender(
      * LPCM shape the receiver accepted for type 100, because a receiver that
      * took LPCM for the main stream will not take Opus here.
      */
+    /**
+     * The `(audioFormat, samplesPerPacket)` pair for the companion stream.
+     *
+     * Prefer what THIS car declared for type 101 in /info. The E2LB lists
+     * `type=101 audioType=default output=0x40008000` (PCM48k/2 + OPUS48k/1),
+     * and 0x40000000 (Opus 48k mono) is the subset the iPhone actually uses.
+     * Both bits are accepted; the declared mask is the safer one to echo.
+     *
+     * The iPhone's own framing for that stream is 960 samples/packet.
+     */
     private fun companionFormat(main: SenderAudioFormat): Pair<Long, Int> = when {
         main.codec == com.carplay.airplay.AudioCodecKind.AAC_LC ->
-            COMPANION_OPUS_FORMAT to COMPANION_OPUS_SAMPLES_PER_PACKET
+            declaredCompanionFormatBits() to COMPANION_OPUS_SAMPLES_PER_PACKET
         else -> main.formatBits to main.samplesPerPacket
+    }
+
+    /**
+     * The `audioOutputFormats` mask this car declared for its type 101 entry,
+     * or the iPhone's 0x40000000 when /info did not carry one.
+     */
+    private fun declaredCompanionFormatBits(): Long {
+        val entries = (sessionInfo["audioFormats"] as? List<*>)
+            ?.mapNotNull { it as? Map<*, *> }
+            .orEmpty()
+        val entry = entries.firstOrNull {
+            (it["type"] as? Number)?.toInt() == 101 &&
+                (it["audioType"] == null || it["audioType"] == "default")
+        } ?: return COMPANION_OPUS_FORMAT
+        val raw = entry["audioOutputFormats"]
+        val bits = when (raw) {
+            is Number -> raw.toLong()
+            is String -> raw.toLongOrNull(16) ?: 0L
+            else -> 0L
+        }
+        return if (bits != 0L) bits else COMPANION_OPUS_FORMAT
     }
 
     /**
@@ -1220,9 +1273,21 @@ class AirPlaySender(
         shared: ByteArray,
         address: InetAddress,
     ) {
+        /*
+         * Which stream to pair with the main one.
+         *
+         * The iPhone on this car runs MainHighAudio (102, AAC) alongside
+         * AltAudio (101, Opus). Only type 100 and 101 were handled here, so a
+         * session that negotiated the AAC main stream — which is every session
+         * on this car — returned immediately and the companion was never
+         * brought up. That is why 1.2.76's "unconditional" call changed
+         * nothing: the early return was on the stream type, not on the caller.
+         */
         val companionType = when (format.streamType) {
             100 -> 101
             101 -> 100
+            // AAC main stream (102) pairs with AltAudio.
+            102 -> 101
             else -> return
         }
         val companionAudioType = if (companionType == 101) "default" else "media"
@@ -1763,8 +1828,22 @@ class AirPlaySender(
                  * stays on the authenticated Bluetooth link; the markers are
                  * acknowledged with 200 and nothing else.
                  */
+                /*
+                 * Only run a link when the car actually enables iAPChannel.
+                 *
+                 * 1.2.75 removed this gate so the link would come up from the
+                 * first marker. The 1.2.77 field logs show what that produces
+                 * on this car: the link reaches READY, we send 0xAA00, the car
+                 * acknowledges the frame and then never sends 0xAA01 — for the
+                 * whole session, in all three captures. It answers neither
+                 * 0x1D00 nor 0xAA00, so the channel is closed by firmware
+                 * policy here and a link on it buys nothing.
+                 *
+                 * Control stays on the authenticated Bluetooth link, and the
+                 * markers are acknowledged with 200.
+                 */
                 val forwarded = receiveIap(data) ||
-                    (ensureCommandIap()?.offer(data) == true)
+                    (carEnablesIapChannel && ensureCommandIap()?.offer(data) == true)
                 val description = describeIapMessage(data)
                 if (!forwarded && reportedCommands.add("iAP:$description")) {
                     events.diagnostic(

@@ -614,16 +614,20 @@ class PhonePublicationTest {
     @Test fun wifiControlAuthenticatesWithoutWirelessConfigurationCapabilitiesOrTransportIdentity() {
         val fixture = Fixture(address = "",profile = PhoneBootstrapProfile.MODERN_WIRELESS,
             purpose = PhoneBootstrapPurpose.CONTROL_SESSION)
-        fixture.identify(false,true,listOf(0x4e09,0x4e0c))
-        assertFalse(fixture.bootstrap.status().controlReady)
-        fixture.authenticate()
+        fixture.controlSessionHandshake(uuidSupported=true, received=listOf(0x4e09,0x4e0c))
+        assertTrue(fixture.bootstrap.status().controlReady)
         val status = fixture.bootstrap.status()
         assertTrue(status.identified && status.authenticated && status.controlReady)
         assertEquals(BootstrapPhase.CONTROL_READY,status.phase)
         assertFalse(status.endpointReceived || status.networkRequestQueued)
         assertNull(fixture.endpoint)
         assertEquals(0,fixture.transportReads)
-        assertEquals(listOf(0x1d00,0x1d02,0xaa00,0xaa02,0xaa05,0x4e09,0x4e0c),fixture.sent.map { it.messageId })
+        // CONTROL_SESSION is authentication-first: begin() sends 0xAA00, and 0x1D00
+        // only goes out after 0xAA05 (see PhoneBootstrap.begin).
+        // CONTROL_SESSION is authentication-first: begin() already sent 0xAA00
+        // before this fixture's first capture, so the recorded order starts at
+        // the challenge reply and 0x1D00 only appears after 0xAA05.
+        assertEquals(listOf(0xaa02,0xaa05,0x1d00,0x1d02,0x4e09,0x4e0c),fixture.sent.map { it.messageId })
     }
 
     @Test fun wifiControlRejectsChangedIdentityEvenIfTheTransportCapabilitiesAreDifferent() {
@@ -631,7 +635,7 @@ class PhonePublicationTest {
         bluetooth.identify(true,true,serial = "isolated-accessory-one")
         val wifi = Fixture(profile = PhoneBootstrapProfile.MODERN_WIRELESS,
             expectedIdentity = bluetooth.bootstrap.accessoryIdentityFingerprint(),purpose = PhoneBootstrapPurpose.CONTROL_SESSION)
-        assertThrows(IllegalStateException::class.java) { wifi.identify(false,true,serial = "isolated-accessory-two") }
+        assertThrows(IllegalStateException::class.java) { wifi.controlSessionHandshake(serial = "isolated-accessory-two") }
         assertFalse(wifi.bootstrap.status().identified || wifi.bootstrap.status().controlReady)
         assertFalse(wifi.sent.any { it.messageId == 0xaa00 })
     }
@@ -644,7 +648,8 @@ class PhonePublicationTest {
         val oldProof = Signature.getInstance("NONEwithECDSA").run { initSign(key.private); update(bluetooth.challenge()); sign() }
         val wifi = Fixture(profile = PhoneBootstrapProfile.MODERN_WIRELESS,key = key,
             expectedIdentity = bluetooth.bootstrap.accessoryIdentityFingerprint(),purpose = PhoneBootstrapPurpose.CONTROL_SESSION)
-        wifi.identify(false,true,listOf(0x4e09))
+        // CONTROL_SESSION is authentication-first: begin() already sent 0xAA00,
+        // so the first thing to arrive is the receiver's certificate.
         wifi.requestChallenge()
         assertFalse(wifi.challenge().contentEquals(bluetooth.challenge()))
         assertThrows(IllegalStateException::class.java) { wifi.bootstrap.receive(Iap2Messages.buildRaw(0xaa03) { bytes(0,oldProof) }) }
@@ -683,6 +688,33 @@ class PhonePublicationTest {
             })
         }
         fun requestChallenge() { bootstrap.receive(Iap2Messages.buildRaw(0xaa01) { bytes(0,byteArrayOf(42)) }) }
+
+        /**
+         * Drives a CONTROL_SESSION through its real order.
+         *
+         * The command channel is authentication-first: begin() sends 0xAA00,
+         * the receiver answers 0xAA01, we send 0xAA02, it answers 0xAA03, we
+         * send 0xAA05, and only then does 0x1D00 go out and 0x1D01 come back.
+         * [identify] alone models the Bluetooth (identification-first) order and
+         * leaves a control session stuck before 0xAA00.
+         */
+        fun controlSessionHandshake(modern: Boolean = false, uuidSupported: Boolean = true,
+            received: List<Int>? = null, serial: String? = null) {
+            requestChallenge()
+            val proof = Signature.getInstance("NONEwithECDSA").run {
+                initSign(key.private); update(challenge()); sign()
+            }
+            bootstrap.receive(Iap2Messages.buildRaw(0xaa03) { bytes(0, proof) })
+            bootstrap.receive(Iap2Messages.buildRaw(0x1d01) {
+                string(0,"Isolated test car"); string(1,"Test model"); string(2,"Test manufacturer")
+                if (serial != null) string(3, serial)
+                u16List(6, if (modern) listOf(0x4301) else listOf(0x5703))
+                u16List(7, received ?: (listOf(0x4e09,0x4e0a,0x4e0d,0x4e0e) + (if (modern) listOf(0x4300) else listOf(0x5702)) +
+                    (if (uuidSupported) listOf(0x4e0c) else emptyList()))
+                )
+                group(17) { u16(0,2); void(2) }
+            })
+        }
         fun challenge() = Iap2BodyReader.of(sent.first { it.messageId == 0xaa02 }).bytes(0)
         fun authenticate() {
             requestChallenge()
