@@ -487,6 +487,27 @@ class AirPlaySender(
                 armedInputs += uuid
             } catch (error: Exception) { events.diagnostic("输入描述符不支持：${error.message}") }
         }
+        /*
+         * Physical buttons the car drives through /info rather than HID.
+         *
+         * This head unit advertises only a 29-byte consumer-control descriptor
+         * and never sends a single HID report, so steering-wheel media keys
+         * cannot arrive that way. `buttonInfo` is the CarPlay side's separate
+         * declaration of physical buttons, and this app never read it — which
+         * is why the previous track / next track buttons did nothing no matter
+         * what the CarLife key mapping said.
+         *
+         * The whole structure is printed first. Its exact shape is not known
+         * yet, and guessing at field names is what produced the 29/30 key-code
+         * mistake; the content has to be seen before anything is wired to it.
+         */
+        (info["buttonInfo"] as? Map<*, *>)?.let { buttons ->
+            events.diagnostic(
+                "车机物理按键声明：${buttons.entries.joinToString(" | ") { (k, v) ->
+                    "$k=${describeButtonValue(v)}"
+                }}",
+            )
+        } ?: events.diagnostic("车机未声明 buttonInfo")
         val displays = (info["displays"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
         displays.forEach { entry ->
             events.diagnostic(
@@ -2290,6 +2311,15 @@ class AirPlaySender(
             addAll(named)
             if (unknown != 0L) add("未知位 0x${unknown.toString(16)}")
         }.joinToString("/")
+    }
+
+    /** Prints a buttonInfo value without assuming its type. */
+    private fun describeButtonValue(value: Any?): String = when (value) {
+        null -> "null"
+        is ByteArray -> "bytes(${value.size})=${value.joinToString(" ") { "%02X".format(it) }}"
+        is List<*> -> "[${value.joinToString(",") { describeButtonValue(it) }}]"
+        is Map<*, *> -> "{${value.entries.joinToString(",") { "${it.key}:${describeButtonValue(it.value)}" }}}"
+        else -> value.toString()
     }
 
     private fun describeViewAreas(display: Map<*, *>): String {
