@@ -161,29 +161,26 @@ object CarPanelGeometry {
         val viewport = resolveViewport(panel, policy)
         if (viewport != null) {
             /*
-             * Fit the whole frame inside the safe rectangle, keeping its shape.
+             * Fill the safe rectangle exactly.
              *
-             * Source 1972x520 (3.79:1) into a 1408x476 (2.96:1) viewport.
-             * The previous code grew to `coverInside` so the picture filled the
-             * viewport vertically at 1805x476 — wider than the rectangle and
-             * clipped by it. On the road that reads as "squashed and cut off",
-             * which is exactly the complaint. Stretching to the viewport's
-             * shape is worse.
-             *
-             * Fitting by the smaller ratio keeps the aspect ratio exactly:
-             * 1408/1972 = 0.714, 476/520 = 0.915, so the scale is 0.714 and the
-             * frame becomes 1408x371, centred in the rectangle. Every control
-             * stays visible and nothing is distorted; what is left over is
-             * wallpaper above and below, inside the safe area.
+             * CarLife is told to encode at the safe-area size (1408x476), so
+             * the source already has the rectangle's shape and this is a
+             * straight 1:1 placement. A source that arrives at the panel size
+             * anyway (CarLife has been seen to ignore the requested size) is
+             * fitted by the smaller ratio so nothing is cropped or stretched.
              */
-            val fitted = fitInside(
-                outerX = viewport.first,
-                outerY = viewport.second,
-                outerWidth = viewport.third,
-                outerHeight = viewport.fourth,
-                sourceWidth = sourceWidth,
-                sourceHeight = sourceHeight,
-            )
+            val fitted = if (sourceWidth == viewport.third && sourceHeight == viewport.fourth) {
+                Quad(viewport.first, viewport.second, viewport.third, viewport.fourth)
+            } else {
+                fitInside(
+                    outerX = viewport.first,
+                    outerY = viewport.second,
+                    outerWidth = viewport.third,
+                    outerHeight = viewport.fourth,
+                    sourceWidth = sourceWidth,
+                    sourceHeight = sourceHeight,
+                )
+            }
             return VideoPlacement(
                 x = fitted.first,
                 y = fitted.second,

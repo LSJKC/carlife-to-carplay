@@ -734,23 +734,20 @@ internal class CarLifeSession(
          * fixed, this is the shape to use.
          */
         /*
-         * Encode at the FULL PANEL's aspect ratio, always.
+         * Encode at the SAFE AREA's size and shape.
          *
-         * The safe area is smaller than the panel (here 1408x476 inside
-         * 1972x520, i.e. 2.96:1 inside 3.79:1). Encoding at the safe-area size
-         * and then pasting that into the panel squeezes CarLife's UI into a
-         * narrow box rather than letting it fill the screen at the panel's
-         * proportions, which is what the driver sees as "looks wrong".
+         * The driver asked for CarLife to fill the safe rectangle exactly, not
+         * to be drawn large and shrunk into it. Telling CarLife to encode at
+         * 1408x476 makes its UI lay itself out for that shape, so the picture
+         * fills the rectangle with no letterboxing and its controls are sized
+         * for the space it actually occupies.
          *
-         * What the iPhone does on this car is the same thing: its own capture
-         * is 2118x981 (2.16:1) while the panel is 1972x520 (3.79:1), so the
-         * receiver is already scaling the phone's canvas onto the display. The
-         * canvas is the panel, and the safe area is metadata handed to CarLife
-         * (areaX/areaY/areaWidth/areaHeight below) so it can keep its own UI
-         * clear of the parts the car covers.
+         * The safe-area metadata below still goes along (areaX/areaY/wh/draw
+         * outside) so CarLife knows where the car's edge overlays sit relative
+         * to its canvas.
          */
-        val sourceWidth = area.panelWidth
-        val sourceHeight = area.panelHeight
+        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
+        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
 
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
