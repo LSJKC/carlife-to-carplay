@@ -76,9 +76,81 @@ internal object CarLifeHardKey {
      * The real skip codes are 15 and 16 (`KEYCODE_SEEK_SUB` /
      * `KEYCODE_SEEK_ADD`), which that same handler routes to
      * `MusicProvider.preSong(false)` / `nextSong(false)`.
+     *
+     * Those codes still only work on the touch socket, which is the path the
+     * car itself never drives on this head unit. See [BROADCAST] below for the
+     * path it actually uses.
      */
     const val NEXT = 16
     const val PREVIOUS = 15
+
+    /*
+     * The broadcast path — what the carreally uses under Honor's launcher.
+     *
+     * CarLife's own enum (`CommonConstants.TEST_KEY_*`) is a different
+     * numbering from the touch-socket codes above:
+     *
+     *     8101 SEEK_SUB      8102 SEEK_ADD
+     *     8103 MAIN          8104 TEL        8105 NAVI       8106 MEDIA
+     *     8107 VR_START      8108 VR_STOP    8109 MEDIA_START 8110 MEDIA_STOP
+     *     8111 PHONE_CALL    8112 PHONE_END  8113 NAVI_QUIT  8114 FOCUS_NEXT
+     *     8115 FOCUS_PRE     8116 MUTE
+     *
+     * Honor's `o4.a` packages them into a broadcast:
+     *
+     *     Intent("com.hihonor.auto.ACTION_HARD_KRY_CLICK")
+     *       .putExtra("mediaKeyCodeExtra", code)   // for 8101/8102/8109/8110
+     *       .putExtra("dockKeyCodeExtra",  code)   // for the dock keys
+     *
+     * and both `CardHostManager` and `caraudio.a` listen for exactly that
+     * action with `mediaKeyCodeExtra`. The reference sender's trace shows the
+     * same two codes arriving at its own listener:
+     *
+     *     key name=暂停 down=true code=8110 accepted=true
+     *     key name=播放 down=true code=8109 accepted=true
+     *
+     * None of this reaches us today: the car sends no HID report, we never
+     * build the iAP2 link that carries 0x6800, and the touch-socket hard key
+     * is never driven. This broadcast is the remaining path.
+     */
+    const val BROADCAST_ACTION = "com.hihonor.auto.ACTION_HARD_KRY_CLICK"
+    const val BROADCAST_MEDIA_EXTRA = "mediaKeyCodeExtra"
+    const val BROADCAST_DOCK_EXTRA = "dockKeyCodeExtra"
+
+    /** CarLife's own broadcast codes (`CommonConstants.TEST_KEY_*`). */
+    const val B_SEEK_SUB = 8101
+    const val B_SEEK_ADD = 8102
+    const val B_MAIN = 8103
+    const val B_TEL = 8104
+    const val B_NAVI = 8105
+    const val B_MEDIA = 8106
+    const val B_VR_START = 8107
+    const val B_VR_STOP = 8108
+    const val B_MEDIA_START = 8109
+    const val B_MEDIA_STOP = 8110
+    const val B_PHONE_CALL = 8111
+    const val B_PHONE_END = 8112
+    const val B_NAVI_QUIT = 8113
+    const val B_FOCUS_NEXT = 8114
+    const val B_FOCUS_PRE = 8115
+    const val B_MUTE = 8116
+
+    /** Broadcast codes Honor carries in `mediaKeyCodeExtra` (o4.a.f26029c). */
+    val BROADCAST_MEDIA_CODES = setOf(B_SEEK_SUB, B_SEEK_ADD, B_MEDIA_START, B_MEDIA_STOP)
+
+    /** Maps an Android key to CarLife's broadcast numbering, or null. */
+    fun toBroadcastCode(androidKeyCode: Int): Int? = when (androidKeyCode) {
+        android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
+        android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> B_SEEK_ADD
+        android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+        android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> B_SEEK_SUB
+        android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+        android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> B_MEDIA_START
+        android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> B_MEDIA_STOP
+        android.view.KeyEvent.KEYCODE_MEDIA_STOP -> B_MEDIA_STOP
+        android.view.KeyEvent.KEYCODE_HEADSETHOOK -> B_MEDIA_START
+        else -> null
+    }
 
     /** Launches the phone screen — never send this for a media button. */
     const val PHONE = 29

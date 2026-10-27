@@ -1177,8 +1177,56 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     override fun onKeyEvent(keyCode: Int, isDown: Boolean) {
         // CarLife takes a key code once, not as a down/up pair.
         if (!isDown) return
+        /*
+         * Send the key BOTH ways, because the two paths serve different hosts.
+         *
+         * The touch socket is what a real CarLife head unit uses
+         * (`MSG_TOUCH_CAR_HARD_KEY_CODE`), and it is the only path that exists
+         * when CarLife is bound to this app.
+         *
+         * Under Honor's launcher that socket is never driven: the car has no
+         * HID key report, we never build the iAP2 link that would carry
+         * 0x6800, and CarLife's own `CommonConstants.TEST_KEY_*` numbering is
+         * reached through a broadcast instead:
+         *
+         *     Intent("com.hihonor.auto.ACTION_HARD_KRY_CLICK")
+         *       .putExtra("mediaKeyCodeExtra", 8101/8102/8109/8110)
+         *
+         * which `CardHostManager` and `caraudio.a` listen for. The
+         * reference sender's trace shows exactly those arriving at its
+         * listener (`key name=暂停 code=8110`, `key name=播放 code=8109`).
+         *
+         * The broadcast goes to HONOR's package, not CarLife's: CarLife has no
+         * receiver for it, and Honor owns `CardHostManager`/`caraudio.a`. When
+         * Honor is the host it forwards the key to CarLife itself.
+         *
+         * Doing both costs one Intent and covers whichever host is active.
+         */
+        val broadcastCode = CarLifeHardKey.toBroadcastCode(keyCode)
+        if (broadcastCode != null) {
+            val context = hostContext ?: lifecycleContext
+            if (context != null) {
+                runCatching {
+                    val intent = Intent(CarLifeHardKey.BROADCAST_ACTION).apply {
+                        setPackage(HONOR_AUTO_PACKAGE)
+                        putExtra(CarLifeHardKey.BROADCAST_MEDIA_EXTRA, broadcastCode)
+                    }
+                    context.sendBroadcast(intent)
+                    observer?.diagnostic(
+                        "媒体键已广播：${CarLifeHardKey.describe(keyCode)} → " +
+                            "mediaKeyCodeExtra=$broadcastCode",
+                    )
+                }.onFailure {
+                    observer?.diagnostic("媒体键广播失败：${it.message}")
+                }
+            }
+        }
         val carLife = CarLifeHardKey.fromAndroid(keyCode) ?: run {
-            observer?.diagnostic("车机按键 ${CarLifeHardKey.describe(keyCode)} 在 CarLife 里没有对应码，已忽略")
+            if (broadcastCode == null) {
+                observer?.diagnostic(
+                    "车机按键 ${CarLifeHardKey.describe(keyCode)} 在 CarLife 里没有对应码，已忽略",
+                )
+            }
             return
         }
         session?.key(carLife)
@@ -1498,6 +1546,15 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
 
         /** Honor's CarLife build. */
         const val CARLIFE_PACKAGE = "com.baidu.carlife.honor"
+
+        /**
+         * Honor's launcher, which is CarLife's host on this phone.
+         *
+         * It owns the `ACTION_HARD_KRY_CLICK` receiver that turns a media key
+         * into a CarLife `TEST_KEY_*` and forwards it; CarLife itself has no
+         * receiver for that action.
+         */
+        const val HONOR_AUTO_PACKAGE = "com.hihonor.auto"
 
         /** Its single activity, which is not reachable through a launch intent. */
         const val CARLIFE_ACTIVITY = "com.baidu.carlife.CarlifeActivity"
