@@ -322,12 +322,27 @@ class Iap2LinkEngine(
                 if (receive.size < IAP2_MARKER.size) return discarded
                 if (receive.matches(IAP2_MARKER)) {
                     if (config.ignoreRepeatedDetectionMarker) {
-                        // E2LB sends the detection marker again while an active
-                        // Wi-Fi command link is healthy. It is a probe/retry,
-                        // not a request to tear down the negotiated session.
-                        // Drop only this marker so a coalesced iAP2 frame is
-                        // parsed in the same pass.
+                        /*
+                         * Echo it back. This is what keeps the session alive.
+                         *
+                         * E2LB sends this marker once a second while the
+                         * Wi-Fi command link is up, and it is not a probe to
+                         * be ignored — the reference sender answers every one
+                         * of them with the identical six bytes
+                         * (`phase=detection-response` in its trace). Dropping
+                         * them instead is what produced the 12.9 s teardown:
+                         * measured from RECORD over three field sessions the
+                         * car resets the control connection at 13084, 13116
+                         * and 13164 ms, and its own marker cadence in the
+                         * failing captures is exactly 1001 ms from 19.07 s to
+                         * 21.07 s, unanswered every time.
+                         *
+                         * It is still not a request to tear down the
+                         * negotiated session, so the link stays up and only
+                         * the marker is consumed.
+                         */
                         receive.discard(IAP2_MARKER.size)
+                        if (!appendOutput(IAP2_MARKER)) return false
                         discarded = true
                         continue
                     }

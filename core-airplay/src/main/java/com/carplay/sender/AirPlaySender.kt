@@ -234,55 +234,6 @@ class AirPlaySender(
     }
 
     /**
-     * Opens the command-channel iAP2 link immediately after RECORD.
-     *
-     * The reference sender does this and this app did not: it waited for the
-     * car's six-byte detection marker, which arrives about 1.2 s after RECORD
-     * and then leads nowhere on this firmware (the car acknowledges our 0xAA00
-     * at the link layer and never answers it).
-     *
-     * Starting the link ourselves — sending the marker echo and our SYN on the
-     * command channel before the car asks — is what the reference capture
-     * shows at RECORD+260 ms. Everything else in that capture (27 command
-     * frames inside the first 13 s, a session that lives 110 s) follows from
-     * it.
-     *
-     * Failures are swallowed: if this transport cannot carry the link, the
-     * marker path below still runs.
-     */
-    private fun startCommandIapEarly() {
-        val wire = control ?: return
-        run("carplay-command-iap-early") {
-            runCatching {
-                // Give the event pump a moment to finish arming inputs so the
-                // marker echo does not race an unrelated command response.
-                Thread.sleep(COMMAND_IAP_EARLY_DELAY_MS)
-                if (closed.get()) return@runCatching
-                /*
-                 * Announce ourselves on the command channel the way the
-                 * receiver expects: the six-byte detection marker first, then
-                 * our own SYN. Sending the marker is what makes the car treat
-                 * the channel as an iAP2 transport at all.
-                 */
-                wire.request(
-                    "POST", "/command",
-                    encode(mapOf("type" to "iAPSendMessage", "params" to mapOf(
-                        "data" to IAP2_MARKER,
-                    ))),
-                    plistHeaders,
-                ) { receiveIapResponse(it, typedOnly = false) }
-                events.diagnostic("已在命令通道主动发起 iAP2（RECORD 后主动建链，不等车机标记）")
-                val tunnel = ensureCommandIap()
-                if (tunnel == null) {
-                    events.diagnostic("命令通道链路未能建立；继续等待车机标记")
-                }
-            }.onFailure {
-                if (!closed.get()) events.diagnostic("主动建立命令通道失败：${it.message}")
-            }
-        }
-    }
-
-    /**
      * Opens the iAP2 link this head unit carries on the Wi-Fi command channel.
      *
      * This firmware never enables `iAPChannel`, rejects the type-130 stream,
@@ -818,29 +769,6 @@ class AirPlaySender(
         // can reset the whole session before the first video packet arrives.
         wire.request("RECORD", "/")
         events.diagnostic("屏幕 RECORD 已完成，等待 startDisplay 启动来源编码器")
-        /*
-         * Open the command-channel iAP2 link NOW, without waiting for a marker.
-         *
-         * This is the one structural difference left between this sender and
-         * the reference one on this car, and it explains the disconnect:
-         *
-         *   reference: RECORD at 4533 ms -> iAPSendMessage(FF 55 02 00 EE 10)
-         *              at 4793 ms (260 ms later), then its own SYN, then 27
-         *              POST /command frames in the next 13 s; session lives
-         *              110 s.
-         *   this app:  RECORD at 8828 ms -> waits for the car's marker at
-         *              9060 ms, links, sends 0xAA00, gets no answer, retries
-         *              every 3 s; 4 POST /command frames in 13 s; the car
-         *              resets the control connection at 21944 ms.
-         *
-         * Both captures are the same car (E2LB) and the same 12.9 s window
-         * measured from RECORD (13084-13164 ms over three sessions). The car
-         * is not enforcing a timer — it is waiting for the command channel to
-         * become active, and the reference sender makes it active 260 ms after
-         * RECORD while this app waits for a marker that arrives 1.2 s later
-         * and then stalls.
-         */
-        startCommandIapEarly()
         val keepAliveWithStats = (info["keepAliveSendStatsAsBody"] == true) ||
             ((info["keepAliveSendStatsAsBody"] as? Number)?.toInt() == 1)
         startVideoKeepAlive(keepAliveWithStats)
@@ -2122,22 +2050,7 @@ class AirPlaySender(
          * the same way), so a dead tunnel has to be replaceable; the cap only
          * stops a car that answers nothing from spinning up links forever.
          */
-        /**
-         * Failures before giving up on the command-channel link.
-         *
-         * The reference sender keeps that link alive for the whole session and
-         * reopens it after the car closes a round, so a small cap would strand
-         * a long session. Each attempt is one link setup, not a per-second
-         * retry, so a higher bound costs nothing.
-         */
-        private const val MAX_COMMAND_IAP_FAILURES = 30
-
-        /**
-         * How long to wait after RECORD before announcing on the command
-         * channel. The reference sender sends its marker echo 260 ms after
-         * RECORD; a little slack lets the event pump finish arming inputs.
-         */
-        private const val COMMAND_IAP_EARLY_DELAY_MS = 250L
+        private const val MAX_COMMAND_IAP_FAILURES = 4
         /** How many touch reports are written out in full before only counts remain. */
         private const val TOUCH_REPORTS_LOGGED = 8
 
