@@ -137,6 +137,9 @@ internal class CarLifeSession(
     @Volatile var mediaInfoSubscribed = false
         private set
 
+    /** Set once the data-subscription handshake has been sent for this session. */
+    private var mediaSubscribed = false
+
     @Volatile var failure: Throwable? = null
         private set
 
@@ -392,31 +395,7 @@ internal class CarLifeSession(
 
             CarLifeProtocol.MD_AUTHEN_RESPONSE -> {
                 sendCommand(CarLifeProtocol.HU_AUTHEN_RESULT, CarLifeProto.authenResult(true))
-                /*
-                 * Subscribe to the phone's media data.
-                 *
-                 * CarLife only registers handlers for
-                 * MSG_CMD_CARLIFE_DATA_SUBSCRIBE / _START / _STOP
-                 * (`CarlifeConnectHsgHandler.addMsg`) — it waits for the head
-                 * unit to ask. `CarlifeDataSubscribe.setMobileCarLifeState`
-                 * then flips `MusicInfoSender.setSubscibe` from moduleID 2, and
-                 * only a subscribed sender emits
-                 * MEDIA_INFO (0x10035) / MEDIA_PROGRESS_BAR (0x10036).
-                 *
-                 * This app never sent the request, which is why the cluster
-                 * stayed on "正在加载媒体…" with no title and no lyrics while
-                 * the AIDL-side MusicInfo call was being logged every second.
-                 * moduleID 0 is turn-by-turn, 2 is media.
-                 */
-                sendCommand(
-                    CarLifeProtocol.HU_DATA_SUBSCRIBE,
-                    CarLifeProto.dataSubscribeDone(listOf(0, 2)),
-                )
-                sendCommand(
-                    CarLifeProtocol.HU_DATA_SUBSCRIBE_START,
-                    CarLifeProto.dataSubscribeDone(listOf(0, 2)),
-                )
-                log("已向 CarLife 订阅数据：模块=0(导航),2(媒体)")
+
                 // This build never sends FEATURE_CONFIG_REQUEST, so the host has
                 // to volunteer the answer. FOCUS_UI is the one that matters: it
                 // tells CarLife to render its car-mode UI into the encoder
@@ -486,6 +465,34 @@ internal class CarLifeSession(
                 // remained at 20, so ask for the car's target after every
                 // completed encoder init, including the initial generation.
                 requestFrameRate(fps, attempt = 0, generation = rateGeneration)
+                /*
+                 * Subscribe to the phone's media data, once CarLife is fully up.
+                 *
+                 * `CarlifeConnectHsgHandler` registers handlers for
+                 * MSG_CMD_CARLIFE_DATA_SUBSCRIBE / _START / _STOP and waits for
+                 * the head unit to ask. `CarlifeDataSubscribe.setMobileCarLife
+                 * State` then flips `MusicInfoSender.setSubscibe` from moduleID
+                 * 2, and only a subscribed sender emits MEDIA_INFO (0x10035) and
+                 * MEDIA_PROGRESS_BAR (0x10036) — the title, artist, lyrics and
+                 * position the cluster shows.
+                 *
+                 * Sending this during authentication was too early: CarLife
+                 * answered nothing at all. By INIT_DONE it has the whole command
+                 * path running, which is when a real head unit asks.
+                 * moduleID 0 is turn-by-turn, 2 is media.
+                 */
+                if (!mediaSubscribed) {
+                    mediaSubscribed = true
+                    sendCommand(
+                        CarLifeProtocol.HU_DATA_SUBSCRIBE,
+                        CarLifeProto.dataSubscribeDone(listOf(0, 2)),
+                    )
+                    sendCommand(
+                        CarLifeProtocol.HU_DATA_SUBSCRIBE_START,
+                        CarLifeProto.dataSubscribeDone(listOf(0, 2)),
+                    )
+                    log("已向 CarLife 订阅数据：模块=0(导航),2(媒体)")
+                }
             }
 
             CarLifeProtocol.MD_FEATURE_CONFIG_REQUEST -> {
