@@ -175,6 +175,8 @@ class AirPlaySender(
     /** Last sampleTime the receiver reported for our audio stream, and how often. */
     @Volatile private var receiverAudioSampleTime: Long = -1L
     @Volatile private var receiverFeedbackCount = 0L
+    /** /feedback requests written; diagnostics only. */
+    @Volatile private var feedbackCount = 0L
     @Volatile private var lastFeedbackReportAt = 0L
 
     @Volatile private var lastAudioTimestamp: Long? = null
@@ -911,6 +913,14 @@ class AirPlaySender(
                          * stream.
                          */
                         wire.sendAndForget("POST", "/feedback")
+                        feedbackCount += 1
+                        if (feedbackCount <= 3 || feedbackCount % 10 == 0L) {
+                            events.diagnostic(
+                                "已发送 /feedback #$feedbackCount" +
+                                    "（视频帧=${videoFramesSinceKeepAlive}，" +
+                                    "音频包=${audioPacketsSent}）",
+                            )
+                        }
                         reportAudioFeedback()
                     }
                 } catch (error: Exception) {
@@ -2026,7 +2036,28 @@ class AirPlaySender(
         }
         return ControlReply(200)
     }
+    /**
+     * A one-line snapshot of everything this session counted.
+     *
+     * Written from `close()` so the last journal entry before a disconnect
+     * says what the two ends actually exchanged. The 13-second teardown has
+     * survived four hypotheses; this turns the next capture into evidence
+     * instead of guesswork.
+     */
+    fun sessionSnapshot(): String {
+        val frames = videoKeepAliveCount
+        val audio = audioPacketsSent
+        val feedback = feedbackCount
+        val tunnel = iap?.diagnosticSummary() ?: "iAP2通道=未建立"
+        val owns = "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
+            "音频=${if (modes.ownsAudio()) "手机" else "车机"}"
+        return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback $owns $tunnel"
+    }
+
     override fun close() {
+        if (!closed.get()) {
+            runCatching { events.diagnostic(sessionSnapshot()) }
+        }
         if (!closed.compareAndSet(false,true)) return
         /*
          * A profile is only considered rejected when SETUP succeeded, real
