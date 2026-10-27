@@ -725,25 +725,26 @@ class AirPlaySender(
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
         /*
-         * Screen SETUP, matching the reference sender on this exact car.
+         * Screen SETUP shape: latencyMs, uuid, displayWidth/displayHeight.
          *
-         * Its body on the E2LB is exactly four keys:
+         * displayWidth/displayHeight were removed in 1.2.75 to match the
+         * reference sender's four-key body, then put back here: that change had
+         * no on-car verification behind it, and 1.2.75 also changed the iAP2
+         * bootstrap at the same time, so a regression could not be attributed
+         * to either one. Both keys were present in every build that produced a
+         * picture on this car. Removing them is a separate experiment, to be
+         * run alone once the session is known to survive.
          *
-         *     {type:110, streamConnectionID, latencyMs:100, uuid}
-         *
-         * Earlier builds also sent displayWidth/displayHeight on the theory
-         * that they tell the head unit where the window sits. The reference
-         * capture does not contain them, and the panel size is already
-         * negotiated in /info — repeating it here describes a different stream
-         * than the one the car expects.
-         *
-         * The key is `uuid`, not `displayUUID`: the latter is a different
-         * Delphi firmware's shape and left this car without a display.
+         * The key is `uuid`, not `displayUUID` — the latter is the shape a
+         * different Delphi firmware uses, and sending it here left the car
+         * without the display it was supposed to place the picture on.
          */
         val stream = linkedMapOf<String, Any>(
             "type" to 110,
             "streamConnectionID" to connection,
             "latencyMs" to SCREEN_LATENCY_MS,
+            "displayWidth" to selected.width,
+            "displayHeight" to selected.height,
         )
         selected.uuid?.let { stream["uuid"] = it }
         val reply = streams(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(stream))), plistHeaders).body)
@@ -2045,15 +2046,13 @@ class AirPlaySender(
         /**
          * Scheduling lead for the screen stream.
          *
-         * 100 ms, matching the reference sender on this exact head unit. Its
-         * screen SETUP on the E2LB is
-         * `{type:110, streamConnectionID, latencyMs:100, uuid}` and it uses the
-         * same value for both of its audio streams. An earlier build sent 75
-         * on the theory that the MIB3 profile used it; the capture from this
-         * car says otherwise, and this is the lead the receiver schedules its
-         * own render against.
+         * 75 ms is what every build that produced a picture on this car used.
+         * 1.2.75 raised it to 100 to match the reference sender's SETUP, then
+         * this reverted: the two values differ by one frame at 30 fps, and the
+         * change rode along with the iAP2 bootstrap rework, so a regression
+         * would not have been attributable. Worth trying on its own later.
          */
-        private const val SCREEN_LATENCY_MS = 100
+        private const val SCREEN_LATENCY_MS = 75
 
         private val CONTROLLER_FEATURES = listOf(
             "uiContext",
