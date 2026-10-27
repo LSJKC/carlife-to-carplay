@@ -6,6 +6,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 object VideoPackets {
+
+    /**
+     * `header[5]` value that marks an encrypted packet as carrying an IDR.
+     *
+     * UxPlay's `raop_rtp_mirror.c` lists the two observed pairs: `0x00 0x00`
+     * for a non-IDR type-1 VCL NAL and `0x00 0x10` for an IDR type-5 VCL NAL.
+     */
+    const val KEY_FRAME_FLAG: Byte = 0x10
+
     fun nals(bytes: ByteArray): List<ByteArray> {
         require(bytes.size in 1..4_194_304)
         fun start(i: Int): Int = when {
@@ -48,36 +57,69 @@ object VideoPackets {
         }.array()
     }
     /**
-     * Screen CONFIG with explicit content and display rectangles.
+     * Screen CONFIG: the unencrypted SPS/PPS packet.
      *
-     * AADisplay's working sender fills both rectangles. Leaving the display
-     * rectangle at zero lets a receiver decide its own placement, which is not
-     * a stable way to centre an irregular panel.
+     * Byte layout taken from UxPlay's `raop_rtp_mirror.c`, which is the
+     * reference every other open sender was written against:
+     *
+     *     0x01 0x00  unencrypted packet carrying a type-7 SPS and a type-8 PPS
+     *     0x16 0x01  the "option" pair real senders put on that packet
+     *
+     * Three things this used to get wrong, all verifiable against UxPlay:
+     *
+     *  - **bytes 8-15 were left at zero.** A receiver ties the codec config to
+     *    the IDR that follows it by comparing that timestamp; UxPlay discards
+     *    the SPS/PPS outright when the two differ ("prepended sps_pps timestamp
+     *    does not match timestamp of video payload ... discarding"). Passing
+     *    the IDR's timestamp in is what makes the pair match.
+     *  - **bytes 6-7 were `0x04 0x00`**, a value that appears in none of the
+     *    option pairs UxPlay lists; `0x16 0x01` is what a real h264 sender
+     *    writes.
+     *  - **bytes 48-51 carried the panel's x/y origin.** UxPlay reads those as
+     *    an unknown pair of floats it only logs, and doubletake does not write
+     *    them at all; putting (278, 44) there sent a malformed config.
+     *
+     * Bytes 16/20 and 40/44 are the same source size twice — UxPlay calls the
+     * second pair "duplication of width_0" — and 56/60 repeat it as well.
      */
     fun config(
         body: ByteArray,
         width: Int,
         height: Int,
-        displayX: Float = 0f,
-        displayY: Float = 0f,
+        ntp: Long,
         displayWidth: Int = width,
         displayHeight: Int = height,
     ): ByteArray {
         require(width > 0 && height > 0 && displayWidth > 0 && displayHeight > 0)
-        require(displayX >= 0f && displayY >= 0f)
         require(body.size <= 65535)
         val header = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN)
-        header.putInt(0, body.size); header.put(4, 1); header.put(6, 4)
+        header.putInt(0, body.size)
+        header.put(4, 1); header.put(6, 0x16.toByte()); header.put(7, 0x01.toByte())
+        header.putLong(8, ntp)
         header.putFloat(16, width.toFloat()); header.putFloat(20, height.toFloat())
-        header.putFloat(32, 0f); header.putFloat(36, 0f)
         header.putFloat(40, width.toFloat()); header.putFloat(44, height.toFloat())
-        header.putFloat(48, displayX); header.putFloat(52, displayY)
         header.putFloat(56, displayWidth.toFloat()); header.putFloat(60, displayHeight.toFloat())
         return header.array() + body
     }
-    fun frame(body: ByteArray, key: ByteArray, counter: Long, ntp: Long): ByteArray {
+
+    /**
+     * One encrypted video frame.
+     *
+     * `header[5]` is the key-frame flag. UxPlay lists the pairs it observes:
+     *
+     *     0x00 0x00  encrypted packet containing a non-IDR type-1 VCL NAL
+     *     0x00 0x10  encrypted packet containing an IDR type-5 VCL NAL
+     *
+     * This sender used to leave it at zero for every frame, so an IDR looked
+     * exactly like a P frame on the wire.
+     */
+    fun frame(body: ByteArray, key: ByteArray, counter: Long, ntp: Long, keyFrame: Boolean = false): ByteArray {
         require(body.size in 1..4_194_304 && key.size == 32 && counter >= 0)
-        val header = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN).apply { putInt(0, body.size + 16); putLong(8, ntp) }.array()
+        val header = ByteBuffer.allocate(128).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putInt(0, body.size + 16)
+            put(5, if (keyFrame) KEY_FRAME_FLAG else 0)
+            putLong(8, ntp)
+        }.array()
         return header + AirPlayCrypto.chachaSeal(key, AirPlayCrypto.nonce64(counter), body, header)
     }
 

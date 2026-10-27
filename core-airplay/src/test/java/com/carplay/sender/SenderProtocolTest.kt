@@ -40,20 +40,36 @@ class SenderProtocolTest {
         assertEquals(0x123456789L,ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).getLong(8))
         assertThrows(Exception::class.java) { ScreenCodec.decryptFrame(key,12,header,packet.copyOfRange(128,packet.size)) }
     }
-    @Test fun screenConfigCarriesContentAndDisplayRectangles() {
-        val packet = VideoPackets.config(byteArrayOf(1,2,3), 1408, 476)
+    @Test fun screenConfigCarriesCodecOptionAndTheFollowingFramesTimestamp() {
+        val packet = VideoPackets.config(byteArrayOf(1,2,3), 1408, 476, 0x1122334455667788L)
         val header = ByteBuffer.wrap(packet, 0, 128).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(3, header.getInt(0))
+        // 0x01 0x00 = unencrypted SPS/PPS; 0x16 0x01 is the option pair a real
+        // h264 sender writes (UxPlay raop_rtp_mirror.c).
+        assertEquals(1, header.get(4).toInt())
+        assertEquals(0, header.get(5).toInt())
+        assertEquals(0x16, header.get(6).toInt() and 0xff)
+        assertEquals(0x01, header.get(7).toInt())
+        // The receiver pairs the config with the IDR that follows it by this
+        // timestamp and drops the SPS/PPS when the two differ.
+        assertEquals(0x1122334455667788L, header.getLong(8))
         assertEquals(1408f, header.getFloat(16), 0f)
         assertEquals(476f, header.getFloat(20), 0f)
-        assertEquals(0f, header.getFloat(32), 0f)
-        assertEquals(0f, header.getFloat(36), 0f)
         assertEquals(1408f, header.getFloat(40), 0f)
         assertEquals(476f, header.getFloat(44), 0f)
+        // 48/52 are unused by every reference receiver; a sender must not put
+        // panel offsets here.
         assertEquals(0f, header.getFloat(48), 0f)
         assertEquals(0f, header.getFloat(52), 0f)
         assertEquals(1408f, header.getFloat(56), 0f)
         assertEquals(476f, header.getFloat(60), 0f)
+    }
+    @Test fun videoPacketMarksKeyFramesOnTheWire() {
+        val key = ByteArray(32); val payload = byteArrayOf(0,0,0,2,0x65,0x42)
+        val idr = VideoPackets.frame(payload, key, 1, 7L, keyFrame = true)
+        val p = VideoPackets.frame(payload, key, 2, 8L, keyFrame = false)
+        assertEquals(0x10, idr[5].toInt() and 0xff)
+        assertEquals(0x00, p[5].toInt() and 0xff)
     }
     @Test fun videoKeepAliveWithoutStatsUsesOpcodeTwoAndNoBody() {
         val packet = VideoPackets.keepAlive(withStats = false)

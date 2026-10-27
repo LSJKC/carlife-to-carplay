@@ -870,31 +870,40 @@ class AirPlaySender(
                     val config = avcC ?: return@withCurrent null
                     synchronized(videoWriteLock) {
                         val output = checkNotNull(video).getOutputStream()
+                        if (!modes.ownsScreen()) return@withCurrent null
+                        if (basePts == null) { basePts = frame.ptsUs; baseNtp = clock.syncedNtp().toLong() }
+                        val elapsed = frame.ptsUs - basePts!!; require(elapsed >= 0)
+                        // The preamble timestamp is computed first: the codec
+                        // config packet has to carry the same value as the
+                        // frame it introduces. UxPlay discards an SPS/PPS whose
+                        // timestamp does not match the following payload's
+                        // ("prepended sps_pps timestamp does not match
+                        // timestamp of video payload ... discarding"), so the
+                        // two writes cannot be ordered the other way round.
+                        val ntp = baseNtp + (elapsed / 1_000_000 shl 32) + ((elapsed % 1_000_000) * 4_294_967_296L / 1_000_000)
                         if (configPending) {
                             resendConfig = false
-                            output.write(VideoPackets.config(config, selected.width, selected.height))
+                            output.write(VideoPackets.config(config, selected.width, selected.height, ntp))
                             sentConfig = config.copyOf()
                             configPending = false
                             videoStreamReady = true
                             events.diagnostic(
                                 "视频 CONFIG 已写出：generation=$configGeneration，" +
-                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound",
+                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，ntp=$ntp",
                             )
                         } else if (sentConfig?.contentEquals(config) != true || resendConfig) {
                             resendConfig = false
-                            output.write(VideoPackets.config(config, selected.width, selected.height))
+                            output.write(VideoPackets.config(config, selected.width, selected.height, ntp))
                             sentConfig = config.copyOf()
                             videoStreamReady = true
                             events.diagnostic(
                                 "视频 CONFIG 已重写：generation=$configGeneration，" +
-                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound",
+                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，ntp=$ntp",
                             )
                         }
-                        if (!modes.ownsScreen()) return@withCurrent null
-                        if (basePts == null) { basePts = frame.ptsUs; baseNtp = clock.syncedNtp().toLong() }
-                        val elapsed = frame.ptsUs - basePts!!; require(elapsed >= 0)
-                        val ntp = baseNtp + (elapsed / 1_000_000 shl 32) + ((elapsed % 1_000_000) * 4_294_967_296L / 1_000_000)
-                        val packet = VideoPackets.frame(frame.bytes, checkNotNull(videoKey), counter++, ntp)
+                        val packet = VideoPackets.frame(
+                            frame.bytes, checkNotNull(videoKey), counter++, ntp, frame.keyFrame,
+                        )
                         output.write(packet); output.flush()
                         if (frame.keyFrame) {
                             events.diagnostic(
