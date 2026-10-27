@@ -456,6 +456,21 @@ internal class AirPlayLink(
                     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
                     var identifyRetries = 0
                     var nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_500)
+                    /*
+                     * Counts what the car actually answers on this transport.
+                     *
+                     * The command channel has never produced a single CSM
+                     * message in any field capture: our 0x1D00 reaches it (the
+                     * link layer acknowledges the packet) and nothing comes
+                     * back. The iPhone capture shows the opposite split — the
+                     * identification exchange happens on the Bluetooth link,
+                     * and this Wi-Fi transport is only used for commands once
+                     * that is done. These two counters make that measurable
+                     * per session instead of inferred from a capture.
+                     */
+                    var csmReceived = 0
+                    var identifyRequested = 0
+                    var lastReport = System.nanoTime()
                     while (!closed.get()) {
                         if (!control.status().controlReady) {
                             check(System.nanoTime() < deadline) { "Wi-Fi iAP2 认证超时" }
@@ -474,13 +489,22 @@ internal class AirPlayLink(
                              * the car is already midway through.
                              */
                             identifyRetries++
+                            identifyRequested++
                             control.begin()
                             nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_000)
                             val stage = control.status()
                             log(
                                 "Wi-Fi iAP2 引导重试 #$identifyRetries：" +
                                     "identified=${stage.identified} authenticated=${stage.authenticated} " +
-                                    "certificate=${stage.certificateReceived}",
+                                    "certificate=${stage.certificateReceived} " +
+                                    "已发识别=${identifyRequested} 已收CSM=$csmReceived",
+                            )
+                        }
+                        if (System.nanoTime() - lastReport >= TimeUnit.SECONDS.toNanos(5)) {
+                            lastReport = System.nanoTime()
+                            log(
+                                "命令通道 5 秒汇总：已发识别=$identifyRequested 已收CSM=$csmReceived " +
+                                    "identified=${control.status().identified}",
                             )
                         }
                         /*
@@ -499,6 +523,9 @@ internal class AirPlayLink(
                             control.begin()
                         }
                         val frame = runtime.recv(1000) ?: continue
+                        csmReceived++
+                        log("命令通道收到 CSM：0x${frame.messageId.toString(16)} " +
+                            "body=${frame.payload.size}B（本会话第 $csmReceived 条）")
                         control.receive(frame)
                         if (control.status().controlReady && !done.isDone) {
                             runtime.awaitOutboundAcknowledged(3000)

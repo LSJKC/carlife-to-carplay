@@ -883,22 +883,26 @@ class AirPlaySender(
                         val ntp = baseNtp + (elapsed / 1_000_000 shl 32) + ((elapsed % 1_000_000) * 4_294_967_296L / 1_000_000)
                         if (configPending) {
                             resendConfig = false
-                            output.write(VideoPackets.config(config, selected.width, selected.height, ntp))
+                            val packet = VideoPackets.config(config, selected.width, selected.height, ntp)
+                            output.write(packet)
                             sentConfig = config.copyOf()
                             configPending = false
                             videoStreamReady = true
                             events.diagnostic(
                                 "视频 CONFIG 已写出：generation=$configGeneration，" +
-                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，ntp=$ntp",
+                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，" +
+                                    VideoPackets.describeConfig(packet),
                             )
                         } else if (sentConfig?.contentEquals(config) != true || resendConfig) {
                             resendConfig = false
-                            output.write(VideoPackets.config(config, selected.width, selected.height, ntp))
+                            val packet = VideoPackets.config(config, selected.width, selected.height, ntp)
+                            output.write(packet)
                             sentConfig = config.copyOf()
                             videoStreamReady = true
                             events.diagnostic(
                                 "视频 CONFIG 已重写：generation=$configGeneration，" +
-                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，ntp=$ntp",
+                                    "大小=${config.size}B，恢复轮次 #$videoRecoveryRound，" +
+                                    VideoPackets.describeConfig(packet),
                             )
                         }
                         val packet = VideoPackets.frame(
@@ -908,7 +912,8 @@ class AirPlaySender(
                         if (frame.keyFrame) {
                             events.diagnostic(
                                 "视频首个/恢复 IDR 已写出：恢复轮次 #$videoRecoveryRound，" +
-                                    "epoch=${frame.epoch}，payload=${frame.bytes.size}B",
+                                    "epoch=${frame.epoch}，payload=${frame.bytes.size}B，" +
+                                    VideoPackets.describeFrame(packet),
                             )
                         }
                         videoStreamReady = true

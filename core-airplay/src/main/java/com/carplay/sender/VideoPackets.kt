@@ -103,6 +103,28 @@ object VideoPackets {
     }
 
     /**
+     * Describes a codec-config packet's header bytes for the session journal.
+     *
+     * Every field this sender recently started writing is named here, so a log
+     * answers "did the fix actually go out" without needing a packet capture.
+     */
+    fun describeConfig(packet: ByteArray): String {
+        val h = ByteBuffer.wrap(packet, 0, 128).order(ByteOrder.LITTLE_ENDIAN)
+        return "type=${h.get(4)}/${h.get(5)} option=0x%02x/0x%02x ntp=%d".format(
+            h.get(6).toInt() and 0xff, h.get(7).toInt() and 0xff, h.getLong(8),
+        ) + " 源=${h.getFloat(16)}x${h.getFloat(20)}" +
+            " 重复=${h.getFloat(40)}x${h.getFloat(44)}" +
+            " 未用48/52=${h.getFloat(48)}x${h.getFloat(52)}" +
+            " 显示=${h.getFloat(56)}x${h.getFloat(60)}"
+    }
+
+    /** Describes the per-frame header fields the car decodes. */
+    fun describeFrame(packet: ByteArray): String {
+        val h = ByteBuffer.wrap(packet, 0, 128).order(ByteOrder.LITTLE_ENDIAN)
+        return "type=${h.get(4)}/${h.get(5).toInt() and 0xff} ntp=${h.getLong(8)}"
+    }
+
+    /**
      * One encrypted video frame.
      *
      * `header[5]` is the key-frame flag. UxPlay lists the pairs it observes:
