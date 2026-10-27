@@ -147,6 +147,8 @@ class Iap2LinkEngine(
     private var markerDeadlineMillis: Long? = null
     /** Detection markers echoed back while the link is up; diagnostics only. */
     private var markerEchoes = 0L
+    /** How many times the peer restarted the link under us; diagnostics only. */
+    private var linkRestartEpoch = 0L
     private var synchronizationDeadlineMillis: Long? = null
     private var sendAcknowledgementDeadlineMillis: Long? = null
     private var receiveAcknowledgementDeadlineMillis: Long? = null
@@ -467,8 +469,82 @@ class Iap2LinkEngine(
         }
     }
 
+    /**
+     * True when a SYN seen while the link is up really starts a new link.
+     *
+     * A plain ACK that happens to carry the SYN bit must not tear anything
+     * down, so this only fires for an unacknowledged peer SYN — the shape the
+     * car sends when it decides to restart: `flags=0x80`, `ack=0`.
+     */
+    private fun startsNewPeerLink(sync: SynchronizationPayload, sequence: Int): Boolean =
+        sync.sessions.isNotEmpty() && sequence != peerSynchronizationSequence
+
+    /**
+     * Tears the current link down and negotiates a fresh one, keeping the
+     * transport open. Mirrors the reference sender's `link-restart`.
+     *
+     * Everything negotiated on the old link is invalid: the control session
+     * id, the peer limits, the retransmission state, the queued and
+     * outstanding packets. Authentication is cleared too, because the car
+     * restarts the whole bootstrap — its trace shows a second
+     * 0xAA00 -> 0xAA01 -> 0xAA03 -> 0xAA05 -> 0x1D00 -> 0x1D01 round.
+     */
+    private fun restartLink(
+        sync: SynchronizationPayload,
+        sequence: Int,
+        nowMillis: Long,
+        confirmsLocalSynchronization: Boolean,
+    ) {
+        linkRestartEpoch += 1
+        queued.clear()
+        unacknowledged.clear()
+        outOfOrder.clear()
+        awaitingPayload = null
+        lastSentAcknowledged = sentSequence
+        lastReceivedInOrder = sequence
+        lastAcknowledgedReceived = sequence
+        accumulatedAcknowledgements = 0
+        reportPacket("LINK-RESTART", Header(0, CONTROL_SYNCHRONIZE, sequence, 0, 0))
+        state = State.NEGOTIATING
+        respondingToPeerSynchronization = true
+        enterNegotiating(nowMillis, sendImmediately = false)
+        peerSynchronization = sync
+        peerSynchronizationReceived = true
+        peerSynchronizationSequence = sequence
+        if (config.negotiateControlSession) {
+            sync.sessions.firstOrNull { it.kind == 0 && it.version == 2 && it.id != 0 }
+                ?.let { controlSessionId = it.id }
+        }
+        sendSynchronization()
+        synchronizationDeadlineMillis = nowMillis + SYNCHRONIZATION_RESEND_MILLIS
+        if (confirmsLocalSynchronization) sendAcknowledgement()
+    }
+
     private fun handleSynchronization(sync: SynchronizationPayload, sequence: Int, nowMillis: Long,
         confirmsLocalSynchronization: Boolean) {
+        /*
+         * A peer SYN while the link is already up starts a NEW link.
+         *
+         * The old `if (state != State.NEGOTIATING) return` dropped it silently.
+         * The reference sender does the opposite and says so in its trace:
+         *
+         *     +7531ms RX link flags=0x80 seq=73 ack=0 session=0 bytes=16
+         *     +7532ms link-restart epoch=1; authentication-and-readiness-cleared
+         *     +7532ms link-restart queues-cleared outstanding-cleared
+         *              control-decoder-reset; waiting-for-new-handshake
+         *     +7533ms TX link flags=0xC0 seq=40 ack=73 ...   (SYN/ACK to the new one)
+         *
+         * followed by a complete second bootstrap (0xAA00 -> 0xAA01 -> ...
+         * -> 0x1D01). This car sends that fresh SYN about 7.5 s into a session
+         * and, measured over every field capture, destroys the control
+         * connection 13.09-13.16 s after RECORD. Ignoring the restarted
+         * handshake is the only thing this sender does differently from the
+         * one that survives 110 s on the same car.
+         */
+        if (state == State.NORMAL && (confirmsLocalSynchronization.not() || startsNewPeerLink(sync, sequence))) {
+            restartLink(sync, sequence, nowMillis, confirmsLocalSynchronization)
+            return
+        }
         if (state != State.NEGOTIATING) return
         if (config.negotiateControlSession) {
             val control = sync.sessions.firstOrNull { it.kind == 0 && it.version == 2 && it.id != 0 }

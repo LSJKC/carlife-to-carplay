@@ -43,9 +43,9 @@ android {
         // every build installed as 1.0.0 and an update over an existing install
         // looked like the same version to the package manager — which is what
         // made installing over an older build fail.
-        versionCode = 208
-        versionName = "1.2.88"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.88-208-key-broadcast\"")
+        versionCode = 209
+        versionName = "1.2.89"
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.2.89-209-link-restart\"")
     }
 
     buildFeatures { buildConfig = true }
