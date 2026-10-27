@@ -77,9 +77,25 @@ internal object Dispatch {
                 }
                 "requestSiri" -> {
                     val action = ((command["params"] as? Map<*, *>)?.get("siriAction") as? Number)?.toInt()
-                    if (action !in setOf(2, 3)) return false
-                    source.onKeyEvent(KeyEvent.KEYCODE_VOICE_ASSIST, action == 2)
-                    CastLog.input()
+                    /*
+                     * The car sends three actions, not two, and the iPhone's own
+                     * trace shows all of them:
+                     *
+                     *     Request Siri action 1.  -> "Action": "Prewarm"
+                     *     Request Siri action 3.  -> "Action": "ButtonUp"
+                     *
+                     * Rejecting 1 made the request look unsupported and answered
+                     * 501 mid-session; it is a warm-up, so it needs an
+                     * acknowledgement and no key event. 2 is ButtonDown.
+                     */
+                    when (action) {
+                        1 -> CastLog.event("INFO", "车机 Siri 预激活")
+                        2 -> { source.onKeyEvent(KeyEvent.KEYCODE_VOICE_ASSIST, true); CastLog.input() }
+                        3 -> { source.onKeyEvent(KeyEvent.KEYCODE_VOICE_ASSIST, false); CastLog.input() }
+                        else -> {
+                            CastLog.event("WARN", "未知 Siri action=$action，已确认")
+                        }
+                    }
                 }
                 // The head unit polls these while it owns the screen. They are
                 // notifications, not requests: answering 501 made it drop the

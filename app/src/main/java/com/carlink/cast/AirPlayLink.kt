@@ -545,6 +545,17 @@ internal class AirPlayLink(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        /*
+         * Record the iAP2 HID state before anything is torn down.
+         *
+         * Touch, media keys, the phone buttons and the voice button all arrive
+         * on the iAP2 command channel after the car sends 0x6800 and we answer
+         * it. If this line says "0x6800 未到达" the car never offered input at
+         * all, and nothing downstream (CarLifeHardKey, the Honor broadcast, the
+         * Android media keys) was ever reachable — which is the difference
+         * between a mapping bug and a transport that never came up.
+         */
+        runCatching { log("输入链路快照：${hid.describe()}") }
         // Stop the source before closing AirPlaySender.  AirPlaySender.close()
         // interrupts its worker threads; doing it first can interrupt the
         // CarLife audio/compositor cleanup and skip releaseCarLife entirely.

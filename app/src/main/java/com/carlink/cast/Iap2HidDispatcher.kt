@@ -31,6 +31,22 @@ internal class Iap2HidDispatcher(
 
     private val devices = ConcurrentHashMap<Int, Device>()
 
+    /**
+     * One line for the session snapshot.
+     *
+     * The whole input chain (touch, media keys, phone and voice buttons) is
+     * dead until the car sends 0x6800 and we answer it. Recording the count and
+     * what each descriptor carried is what tells "the car never asked" apart
+     * from "the car asked and the descriptor was unusable".
+     */
+    fun describe(): String {
+        if (devices.isEmpty()) return "iAP2-HID=未注册（0x6800 未到达）"
+        return "iAP2-HID=" + devices.values.joinToString(",") { d ->
+            "dev=${d.id} ${d.width ?: "?"}x${d.height ?: "?"} " +
+                "desc=${d.descriptor.size}B keys=${d.keys != null} touch=${d.touch != null}"
+        }
+    }
+
     @Volatile
     private var display: SenderDisplay? = null
 

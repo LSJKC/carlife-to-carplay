@@ -631,7 +631,10 @@ class AirPlaySender(
             )
         }
         if (armedInputs.isNotEmpty()) {
-            events.diagnostic("hidSetInputMode 已排队 ${armedInputs.size}：${armedInputs.joinToString(",")}")
+            events.diagnostic(
+                "hidSetInputMode 已排队 ${armedInputs.size}：${armedInputs.joinToString(",")}；" +
+                    "触控设备=${touchDevices.size} 按键设备=${keyDevices.size}",
+            )
         }
         wire.onRequest = { handleCommand(it.body) }
         wire.onResponse = { receiveIapResponse(it,typedOnly = true) }
@@ -2100,8 +2103,9 @@ class AirPlaySender(
         val tunnel = iap?.diagnosticSummary() ?: "iAP2通道=未建立"
         val owns = "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
             "音频=${if (modes.ownsAudio()) "手机" else "车机"}"
+        val hid = "HID触控设备=${touchDevices.size} 按键设备=${keyDevices.size}"
         return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback " +
-            "$owns $tunnel"
+            "$owns $tunnel $hid"
     }
 
     override fun close() {
