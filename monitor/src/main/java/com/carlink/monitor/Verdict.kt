@@ -31,6 +31,15 @@ object Verdict {
         }
 
         // ---- 1. 进程存活 ----
+        //
+        // 按 pid 对比只能回答「这个进程实例还在不在」，不能直接答「CarLife 还
+        // 在不在」。第一次真机运行就是被这一点误导的：com.carlife.honor 每隔
+        // 十几秒就以新 pid 出现一次，按 pid 比全是「进程已退出」，看起来像
+        // CarLife 在不停崩溃，其实那是荣耀车联每次投屏都重拉一遍 CarLife，
+        // 同一时刻它一直都在。
+        //
+        // 所以分两层：pid 级只报「崩溃/僵尸」这类真事件；进程名级回答
+        // 「CarLife 整个应用还在不在」，这才是面板要显示的结论。
         val before = previous.processes.associateBy { it.pid }
         val after = current.processes.associateBy { it.pid }
 
@@ -51,10 +60,13 @@ object Verdict {
             }
         }
         for ((pid, proc) in before) {
-            if (pid !in after && !proc.isDead) {
-                events += Event(at, Severity.ALERT,
-                    "${proc.name}(pid=$pid) 从进程列表中消失：进程已退出")
+            if (pid in after || proc.isDead) continue
+            // 同名进程还在（可能是新 pid）就不算退出，只记一条重启提示
+            if (proc.name in current.processes.map { it.name }) {
+                continue
             }
+            events += Event(at, Severity.ALERT,
+                "${proc.name}(pid=$pid) 已经不在运行：进程退出且没有同名进程接替")
         }
 
         // ---- 2. 端口状态 ----

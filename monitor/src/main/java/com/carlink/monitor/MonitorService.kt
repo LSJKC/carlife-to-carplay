@@ -151,17 +151,26 @@ object MonitorState {
     fun observe(listener: () -> Unit) { synchronized(this) { listeners += listener } }
     fun forget(listener: () -> Unit) { synchronized(this) { listeners -= listener } }
 
-    /** 导出成纯文本，格式便于贴到对话里或存文件。 */
+    /**
+     * 导出成纯文本，行数不设上限。
+     *
+     * 采样按时间正序写，事件按时间正序写：这份文件是拿去对照 carlink-cast
+     * 自己的日志看的，两个文件的时间线方向必须一致，否则没法逐秒对齐。
+     */
     fun export(): String = synchronized(this) {
         buildString {
             appendLine("# CarLife 监测记录  样本=${samples.size}  事件=${events.size}")
             appendLine("# 采样间隔=${intervalMillis}ms")
+            appendLine("# 时刻(绝对毫秒) 距首轮(毫秒) 内容")
             appendLine()
-            samples.forEach { appendLine(Verdict.line(it)) }
+            val base = samples.firstOrNull()?.atMillis ?: 0L
+            samples.forEach { s ->
+                appendLine("${s.atMillis} +${s.atMillis - base}  ${Verdict.line(s)}")
+            }
             appendLine()
             appendLine("# ---- 事件 ----")
             events.forEach { e ->
-                appendLine("[${e.severity}] ${e.atMillis} ${e.text}")
+                appendLine("${e.atMillis} +${e.atMillis - base} [${e.severity}] ${e.text}")
             }
         }
     }

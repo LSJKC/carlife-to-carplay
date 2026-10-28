@@ -1101,6 +1101,22 @@ class AirPlaySender(
     }
 
     /**
+     * One decimal place, without a format string.
+     *
+     * `String.format("%.1f", ...)` in a diagnostic path is a liability: it is
+     * the exact call that threw `IllegalFormatConversionException` on 1.3.3's
+     * first heartbeat and killed the session. Rounding a non-negative duration
+     * is arithmetic, so do the arithmetic.
+     */
+    private fun oneDecimal(value: Double): String {
+        // 截断而非四舍五入：这是诊断用的时长，显示 2.9s 而实际是 2.84s 会让
+        // 人以为是两个不同的时刻。Math.round 在 .05 这类值上还会向下取整，
+        // 结果更难解释。
+        val tenths = (value.coerceAtLeast(0.0) * 10.0).toLong()
+        return "${tenths / 10}.${tenths % 10}"
+    }
+
+    /**
      * Records, once a second, whether the car is still talking to us.
      *
      * The session is destroyed 13.1 s after RECORD on every build measured. What
@@ -1125,20 +1141,27 @@ class AirPlaySender(
                     if (closed.get()) break
                     heartbeatCount++
                     val now = System.nanoTime()
-                    val sinceRecord = (now - recordedAt) / 1_000_000_000.0
-                    fun silence(at: Long) = if (at == 0L) "从未" else
-                        "%.1fs".format((now - at) / 1_000_000_000.0)
+                    /*
+                     * Built by concatenation, not String.format.
+                     *
+                     * 1.3.3 shipped this line as a format string and it threw
+                     * `IllegalFormatConversionException: d != java.lang.Double`
+                     * on the first tick, which took the worker down and with it
+                     * the whole AirPlay session at 8.3 s — the heartbeat built
+                     * to diagnose a disconnect caused one. There is no reason to
+                     * route a dozen counters through a format string that can
+                     * fail at runtime; the values are all read once here anyway.
+                     */
+                    fun silence(at: Long): String =
+                        if (at == 0L) "从未" else oneDecimal((now - at) / 1_000_000_000.0) + "s"
                     events.diagnostic(
-                        "RECORD 心跳 #$heartbeatCount +%.1fs：车机静默 事件=%s(共%d) 命令=%s(共%d)；" +
-                            "本端视频帧=%d 音频包=%d /feedback=%d 屏幕=%s 音频=%s"
-                                .format(
-                                    sinceRecord,
-                                    silence(lastInboundEventNanos), inboundEventCount,
-                                    silence(lastInboundIapNanos), inboundIapCount,
-                                    videoKeepAliveCount, audioPacketsSent, feedbackCount,
-                                    if (modes.ownsScreen()) "手机" else "车机",
-                                    if (modes.ownsAudio()) "手机" else "车机",
-                                ),
+                        "RECORD 心跳 #$heartbeatCount +${oneDecimal((now - recordedAt) / 1_000_000_000.0)}s：" +
+                            "车机静默 事件=${silence(lastInboundEventNanos)}(共$inboundEventCount) " +
+                            "命令=${silence(lastInboundIapNanos)}(共$inboundIapCount)；" +
+                            "本端视频帧=$videoKeepAliveCount 音频包=$audioPacketsSent " +
+                            "/feedback=$feedbackCount " +
+                            "屏幕=${if (modes.ownsScreen()) "手机" else "车机"} " +
+                            "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
                     )
                 }
             } catch (_: InterruptedException) {

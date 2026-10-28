@@ -84,7 +84,19 @@ class SamplerTest {
     @Test
     fun processDisappearingIsAnAlert() {
         val site = Verdict.diff(sample(processes = listOf(proc())), sample(processes = emptyList()))
-        assertTrue(site.any { it.severity == Verdict.Severity.ALERT && it.text.contains("消失") })
+        assertTrue(site.any { it.severity == Verdict.Severity.ALERT && it.text.contains("不在运行") })
+    }
+
+    @Test
+    fun restartUnderANewPidIsNotReportedAsAnExit() {
+        // 荣耀车联每次投屏都会重拉一遍 CarLife，pid 变了但应用一直在。
+        // 按 pid 对比报「进程已退出」会把正常拉起显示成崩溃——第一次真机
+        // 运行就是被这一点误导的。
+        val site = Verdict.diff(
+            sample(processes = listOf(proc(pid = 100))),
+            sample(processes = listOf(proc(pid = 200))),
+        )
+        assertFalse(site.any { it.text.contains("不在运行") })
     }
 
     @Test

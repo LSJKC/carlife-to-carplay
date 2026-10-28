@@ -63,7 +63,7 @@ class Sampler(private val runner: Shell = RootShell()) {
         }
 
         val processes = readProcesses(errors)
-        val sockets = readSockets(errors)
+        val sockets = readSockets(processes, errors)
         val encoder = readCount(
             "dumpsys media.codec 2>/dev/null | grep -c 'c2.qti.avc.encoder'", errors,
         )
@@ -74,10 +74,18 @@ class Sampler(private val runner: Shell = RootShell()) {
         val audio = runner.run("dumpsys audio 2>/dev/null | grep -m1 'mode:'")
             ?.trim()?.takeIf { it.isNotEmpty() }
 
-        val fds = processes.associate { it.pid to readCount("ls /proc/${it.pid}/fd 2>/dev/null | wc -l", errors) }
+        // fd 数量只对 CarLife 本体有意义，而且每多一个进程就多一次 su 往返。
+        // 只统计名字里带 carlife/carlink 的，别把荣耀车联宿主的 fd 也算进来
+        // 冒充泄漏——第一次运行时报出的「持续增长」大多是采样时点不同造成的。
+        val fds = processes
+            .filter { isCarLifeProcess(it.name) }
+            .associate { it.pid to readCount("ls /proc/${it.pid}/fd 2>/dev/null | wc -l", errors) }
 
         return Sample(now, processes, sockets, encoder, layers, audio, fds, errors)
     }
+
+    private fun isCarLifeProcess(name: String) =
+        name.contains("carlife", ignoreCase = true) || name.contains("carlink", ignoreCase = true)
 
     private fun readProcesses(errors: MutableList<String>): List<ProcInfo> {
         // 一次 shell 把所有候选进程的 stat 读出来，而不是每个进程起一次 su。
@@ -86,13 +94,25 @@ class Sampler(private val runner: Shell = RootShell()) {
         //
         // 脚本里一律避开 ${...} 花括号展开：这段字符串要经过 Kotlin 模板和
         // shell 两层解析，花括号在两层里含义不同，最省事的写法是只用 basename。
+        //
+        // 三条排除规则都来自第一次真机运行暴露的误报：
+        //
+        //   * 名字和命令行都以 `!` 开头的是已退出的僵尸/墓碑条目，不是活进程。
+        //   * `sh` 是 su 自己——root 包装器跑的是 sh，每个用 root 的东西都会
+        //     留下一个，它跟 CarLife 没有任何关系，却因为匹配了 `carlink.monitor`
+        //     的命令行被当成 CarLife 进程收了进来。
+        //   * 命令行匹配只认包名本身，不认任意包含它的路径，否则任何命令行里
+        //     恰好带了这几个字的进程都会被算进来。
         val script = listOf(
             "for d in /proc/[0-9]*; do",
             "  [ -r \"\$d/cmdline\" ] || continue",
             "  n=\$(cat \"\$d/comm\" 2>/dev/null)",
+            "  case \"\$n\" in '!'*) continue;; esac",
+            "  case \"\$n\" in sh|ash|bash|su|toybox) continue;; esac",
             "  c=\$(tr '\\0' ' ' < \"\$d/cmdline\" 2>/dev/null)",
+            "  case \"\$c\" in '!'*) continue;; esac",
             "  case \"\$n \$c\" in",
-            "    *baidu.carlife*|*hihonor.auto*|*carlink.cast*|*carlink.monitor*)",
+            "    *baidu.carlife*|*com.hihonor.auto*|*com.carlink.cast*|*com.carlink.monitor*)",
             "      echo \"PROC \$(basename \$d) \$(cat \"\$d/stat\" 2>/dev/null)\";;",
             "  esac",
             "done",
@@ -119,15 +139,22 @@ class Sampler(private val runner: Shell = RootShell()) {
      */
     internal fun parseStat(entry: String): ProcInfo? {
         val pid = entry.substringBefore(' ').toIntOrNull() ?: return null
-        val afterName = entry.substringAfter(") ", missingDelimiterValue = "")
-        if (afterName.isEmpty()) return null
-        val fields = afterName.split(' ').filter { it.isNotEmpty() }
+        // comm 被括号包裹，从第一个 '(' 到最后一个 ')' 之间全部是名字，
+        // 名字里允许出现空格，理论上也允许出现括号。用 indexOf/lastIndexOf
+        // 而不是 substringAfter('(')，否则名字以 '(' 开头时会吃掉一个字符——
+        // 第一次真机运行就出现过 `om.hihonor.auto`：真实名字是
+        // `com.hihonor.auto`，首字母被切掉了。
+        val open = entry.indexOf('(')
+        val close = entry.lastIndexOf(") ")
+        if (open < 0 || close <= open) return null
+        val name = entry.substring(open + 1, close)
+        val fields = entry.substring(close + 2).split(' ').filter { it.isNotEmpty() }
         if (fields.size < 22) return null
         val state = fields[0].firstOrNull() ?: return null
         return ProcInfo(
             pid = pid,
             ppid = fields[1].toIntOrNull() ?: 0,
-            name = entry.substringAfter('(').substringBefore(") ").trim(),
+            name = name,
             state = state,
             cpuMillis = ((fields[11].toLongOrNull() ?: 0L) + (fields[12].toLongOrNull() ?: 0L)) * 10L,
             threads = fields[17].toIntOrNull() ?: 0,
@@ -135,24 +162,43 @@ class Sampler(private val runner: Shell = RootShell()) {
         )
     }
 
-    private fun readSockets(errors: MutableList<String>): List<SocketInfo> {
+    /**
+     * 读 CarLife 的 TCP 端口。
+     *
+     * 必须在 root 下遍历 /proc/<pid>/net 而不是读 /proc/net：从 Android 10 起
+     * `/proc/net` 被 mount 成每个网络命名空间一份，普通进程读到的只有自己
+     * 那个命名空间的 socket。第一次真机运行时这里恒为「无连接」——而
+     * carlink-cast 的同一时刻日志显示 7 个端口全部 ESTABLISHED。
+     *
+     * 换成读目标进程自己的 `/proc/<pid>/net/tcp{,6}`：那是它所在的命名空间，
+     * 只要进程是 CarLife 本体，这里就能看到它开的全部端口。
+     */
+    private fun readSockets(processes: List<ProcInfo>, errors: MutableList<String>): List<SocketInfo> {
         val out = mutableListOf<SocketInfo>()
-        for (file in listOf("/proc/net/tcp", "/proc/net/tcp6")) {
-            val raw = runner.run("cat $file 2>/dev/null") ?: continue
-            for (line in raw.lineSequence().drop(1)) {
-                val fields = line.trim().split(Regex("\\s+"))
-                if (fields.size < 5) continue
-                val port = fields[1].substringAfter(':', "").toIntOrNull(16) ?: continue
-                if (port !in CARLIFE_PORTS) continue
-                val queue = fields[4].split(':')
-                out += SocketInfo(
-                    port = port,
-                    state = stateName(fields[3]),
-                    txQueue = queue.getOrNull(0)?.toLongOrNull(16) ?: 0L,
-                    rxQueue = queue.getOrNull(1)?.toLongOrNull(16) ?: 0L,
-                )
+        var readAny = false
+        for (proc in processes) {
+            for (file in listOf("tcp", "tcp6")) {
+                val raw = runner.run("cat /proc/${proc.pid}/net/$file 2>/dev/null") ?: continue
+                if (raw.isBlank()) continue
+                readAny = true
+                for (line in raw.lineSequence().drop(1)) {
+                    val fields = line.trim().split(Regex("\\s+"))
+                    if (fields.size < 5) continue
+                    val port = fields[1].substringAfter(':', "").toIntOrNull(16) ?: continue
+                    if (port !in CARLIFE_PORTS) continue
+                    val queue = fields[4].split(':')
+                    val socket = SocketInfo(
+                        port = port,
+                        state = stateName(fields[3]),
+                        txQueue = queue.getOrNull(0)?.toLongOrNull(16) ?: 0L,
+                        rxQueue = queue.getOrNull(1)?.toLongOrNull(16) ?: 0L,
+                    )
+                    // 同一个端口在多个进程的命名空间里会重复出现，按 (端口, 状态) 去重
+                    if (out.none { it.port == port && it.state == socket.state }) out += socket
+                }
             }
         }
+        if (!readAny && processes.isNotEmpty()) errors += ERR_SOCKETS_UNREADABLE
         return out
     }
 
@@ -170,6 +216,7 @@ class Sampler(private val runner: Shell = RootShell()) {
     companion object {
         const val ERR_NO_ROOT = "没有 root 权限，读不到 CarLife 的进程状态"
         const val ERR_PROC_UNREADABLE = "读不到 /proc 进程列表"
+        const val ERR_SOCKETS_UNREADABLE = "读不到 CarLife 的 socket 表"
         val CARLIFE_PORTS = setOf(7240, 8240, 9240, 9241, 9242, 9340, 9440)
     }
 }

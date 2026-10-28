@@ -116,6 +116,59 @@ class MonitorActivity : AppCompatActivity() {
             .ifEmpty { "（无）" }
     }
 
+    /**
+     * 把完整记录写到 Download/CarLifeMonitor/ 下。
+     *
+     * 走 MediaStore 而不是直接写外部存储路径：Android 10 之后应用自己的
+     * 外部目录别的应用读不到，用户也就没法把它传给我；MediaStore 的
+     * Downloads 集合不需要任何权限，文件管理器里也直接可见。
+     */
+    private fun exportToFile() {
+        val text = MonitorState.export()
+        if (text.isBlank()) {
+            toast("还没有可导出的内容")
+            return
+        }
+        val name = "carlife-monitor-" +
+            java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date()) +
+            ".txt"
+        try {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(
+                    android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_DOWNLOADS + "/CarLifeMonitor",
+                )
+            }
+            val uri = contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+            ) ?: run { toast("无法创建文件"); return }
+            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+                ?: run { toast("无法写入文件"); return }
+            toast("已保存到 下载/CarLifeMonitor/$name（${text.length} 字）")
+        } catch (error: Exception) {
+            toast("导出失败：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    /** 只复制判读结论。内容短，剪贴板放得下。 */
+    private fun copySummary() {
+        val (samples, events) = MonitorState.snapshot()
+        if (samples.isEmpty() && events.isEmpty()) {
+            toast("还没有可复制的内容")
+            return
+        }
+        val base = samples.firstOrNull()?.atMillis ?: (events.firstOrNull()?.atMillis ?: 0L)
+        val text = buildString {
+            appendLine("# CarLife 监测判读 样本=${samples.size} 事件=${events.size}")
+            events.forEach { appendLine("+${it.atMillis - base} [${it.severity}] ${it.text}") }
+        }
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("CarLife 监测判读", text))
+        toast("已复制 ${text.length} 字（完整记录请用「导出到文件」）")
+    }
+
     private fun buildLayout(): ScrollView {
         val root = ScrollView(this)
         val column = LinearLayout(this).apply {
@@ -155,13 +208,15 @@ class MonitorActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8), 0, dp(8))
         }
-        actions.addView(smallButton("复制全部") {
-            val text = MonitorState.export()
-            if (text.isBlank()) return@smallButton
-            getSystemService(ClipboardManager::class.java)
-                .setPrimaryClip(ClipData.newPlainText("CarLife 监测", text))
-            toast("已复制 ${text.length} 字")
-        })
+        /*
+         * 导出走文件，不走剪贴板。
+         *
+         * 剪贴板在 Android 上有大小上限（Binder 事务 1MB 左右，各家 ROM 还会
+         * 再压），一次几十分钟的采样加上事件远超这个量，表现就是「复制了但
+         * 只能粘出一半」——第一次交给我的记录正是这么被截断的。写文件没有上限。
+         */
+        actions.addView(smallButton("导出到文件") { exportToFile() })
+        actions.addView(smallButton("复制摘要") { copySummary() })
         actions.addView(smallButton("清空") {
             MonitorState.clear()
             render()
