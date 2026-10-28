@@ -59,12 +59,22 @@ internal class AirPlayLink(
     private val bluetoothAlive: () -> Boolean,
     private val bluetoothIdentity: () -> ByteArray?,
     private val log: (String) -> Unit,
+    /**
+     * Shared with the Bluetooth link, which subscribes first.
+     *
+     * The head unit's own identification names 0x5000 among the messages it
+     * sends and 0x5001 among the ones it receives, and the Bluetooth exchange
+     * completes every session while the Wi-Fi command channel never does.
+     * Owning the publisher above both links lets the subscription start on the
+     * transport that actually works instead of the one that does not.
+     */
+    private val nowPlayingPublisher: NowPlayingPublisher? = null,
     private val terminalFailure: (Throwable) -> Unit = {},
 ) : Closeable {
 
     private val closed = AtomicBoolean()
     private val audioProfiles = AudioProfileMemory(context, peerAddress)
-    private val nowPlaying = NowPlayingPublisher(context, log)
+    private val nowPlaying = nowPlayingPublisher ?: NowPlayingPublisher(context, log)
     @Volatile private var nowPlayingSubscription = 0L
     private val failed = AtomicBoolean()
     private val resources = mutableListOf<Closeable>()

@@ -53,6 +53,20 @@ internal class BluetoothBootstrap(
     private val transportIdentifier: String,
     private val trust: (authenticatedBluetooth: Boolean) -> AccessoryAuthentication,
     private val log: (String) -> Unit,
+    /**
+     * Starts the Now Playing subscription on this link.
+     *
+     * This transport, not the Wi-Fi command channel, is where the head unit
+     * actually asks for media. Its own identification names `0x5000` in the
+     * messages it sends and `0x5001` in the ones it receives, and the
+     * identification/authentication exchange completes here every session.
+     *
+     * The command channel was tried first and never reached READY on this
+     * firmware, so the media subscription scheduled behind it never ran — the
+     * car showed a media card with nothing in it for the whole session.
+     */
+    private val startNowPlaying: ((send: (com.carplay.iap2.wire.Iap2Frame) -> Unit,
+                                   sendFile: (ByteArray) -> Boolean) -> Unit)? = null,
 ) : AutoCloseable {
 
     data class Result(val endpoint: WirelessEndpoint, val accessoryIdentity: ByteArray)
@@ -72,6 +86,9 @@ internal class BluetoothBootstrap(
     @Volatile private var socket: BluetoothSocket? = null
     @Volatile private var receiver: Thread? = null
     @Volatile private var linkTransport: PhoneBluetoothSessionTransport? = null
+
+    /** Set once, so a status callback that repeats cannot subscribe twice. */
+    @Volatile private var nowPlayingStarted = false
     @Volatile private var authentication: AccessoryAuthentication? = null
 
     private var phoneService: RegisteredRfcommService<BluetoothServerSocket>? = null
@@ -221,6 +238,26 @@ internal class BluetoothBootstrap(
             when {
                 status.controlReady -> Unit
                 status.authenticated && !status.endpointReceived -> log("车机身份已验证，等待无线配置")
+            }
+            /*
+             * Media is subscribed once identification is done and *before* the
+             * wireless configuration arrives.
+             *
+             * `identified` is the flag that matters: 0x5000 is a control-session
+             * message, and the car rejects one that arrives before it has
+             * identified the accessory. Waiting for the endpoint would be too
+             * late in the other direction — the endpoint is delivered last, so
+             * a receiver that missed the subscription shows an empty media card
+             * for the rest of the session.
+             */
+            if (status.identified && !nowPlayingStarted) {
+                val current = session
+                if (current != null) {
+                    nowPlayingStarted = true
+                    runCatching {
+                        startNowPlaying?.invoke(current::send, current::sendFileTransfer)
+                    }.onFailure { log("订阅车机媒体信息失败：${it.message}") }
+                }
             }
         },
         profile = PhoneBootstrapProfile.MODERN_WIRELESS,

@@ -69,6 +69,15 @@ internal class CastEngine(
                 .onFailure { CastLog.event("WARN", "画面来源预热失败：${it.message}") }
 
             CastLog.stage(CastStage.BLUETOOTH, "与车机建立 iAP2 链路")
+            /*
+             * One media publisher for both links.
+             *
+             * The Bluetooth exchange is the one that reaches identification on
+             * this firmware, so that is where the subscription has to start;
+             * the Wi-Fi command channel keeps its own fallback so a future
+             * firmware that does answer there still works.
+             */
+            val nowPlaying = NowPlayingPublisher(context) { message -> log(message) }
             val link = BluetoothBootstrap(
                 context = context,
                 peerAddress = peer,
@@ -79,6 +88,10 @@ internal class CastEngine(
                 transportIdentifier = address,
                 trust = { authenticated -> trustFor(peer, authenticated) },
                 log = { message -> log(message) },
+                startNowPlaying = { send, sendFile ->
+                    val token = nowPlaying.subscribeDefault(send, sendFile)
+                    log("已在蓝牙链路订阅车机媒体信息：token=$token")
+                },
             )
             bluetooth = link
             val result = link.connect()
@@ -108,6 +121,7 @@ internal class CastEngine(
                 bluetoothAlive = { link.isAlive() },
                 bluetoothIdentity = { link.identityFingerprint() },
                 log = { message -> log(message) },
+                nowPlayingPublisher = nowPlaying,
             )
             airplay = channel
             channel.start(
