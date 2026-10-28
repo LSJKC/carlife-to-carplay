@@ -1101,22 +1101,6 @@ class AirPlaySender(
     }
 
     /**
-     * How much un-packetised PCM may be held before the oldest packet is
-     * discarded.
-     *
-     * Four packets is far too tight for this source: CarLife hands over 4392 B
-     * at a time (2196 samples, 45.75 ms) while a packet is only 1408 B, so one
-     * source buffer already exceeds four packets on its own. Sized in *time*
-     * instead — [PCM_BACKLOG_LIMIT_MS] of audio — so the budget stays the same
-     * whatever the packet size or sample rate becomes.
-     */
-    private fun pcmBacklogLimit(format: SenderAudioFormat): Int {
-        val bytesPerSecond = format.sampleRate.toLong() * format.channels * BYTES_PER_PCM_SAMPLE
-        val limit = bytesPerSecond * PCM_BACKLOG_LIMIT_MS / 1000L
-        return limit.coerceAtLeast(format.pcmPacketBytes.toLong() * 2).toInt()
-    }
-
-    /**
      * One decimal place, without a format string.
      *
      * `String.format("%.1f", ...)` in a diagnostic path is a liability: it is
@@ -1885,32 +1869,13 @@ class AirPlaySender(
             synchronized(audioQueueLock) {
                 if (!isCurrentAudioChunkLocked(chunk)) return
                 pcmCarry = if (offset >= merged.size) ByteArray(0) else merged.copyOfRange(offset, merged.size)
-                if (pcmCarry.size > pcmBacklogLimit(format)) {
-                    /*
-                     * Trim, do not empty.
-                     *
-                     * This used to drop the whole carry buffer the moment it
-                     * passed four packets. One CarLife chunk is 4392 B while a
-                     * packet is 1408 B, so a single source buffer carries the
-                     * backlog past that threshold by itself — and the whole
-                     * remainder, up to ~3 packets of real audio, went in the
-                     * bin every time the source got slightly ahead. On the wire
-                     * that is an audible gap, measured as 9 underruns in 650
-                     * chunks on the field capture.
-                     *
-                     * Keeping the newest audio and discarding only what is left
-                     * over the limit bounds latency the same way while never
-                     * throwing away everything that is pending. Aligning the
-                     * cut to a packet boundary keeps the remainder whole: a
-                     * partial packet can never be played and would otherwise be
-                     * carried until the next chunk completes it.
-                     */
-                    val limit = pcmBacklogLimit(format)
-                    val excess = pcmCarry.size - limit
-                    val aligned = ((excess + frameBytes - 1) / frameBytes) * frameBytes
-                    val drop = aligned.coerceAtMost(pcmCarry.size)
-                    pcmCarryDropped += drop
-                    pcmCarry = pcmCarry.copyOfRange(drop, pcmCarry.size)
+                if (pcmCarry.size > frameBytes * 4) {
+                    // The backlog grew past four packets: the source is running
+                    // ahead of the wire. Dropping it keeps latency bounded,
+                    // which is the same trade the 对照实现 sender makes with
+                    // its ring buffer's expiry counter.
+                    pcmCarryDropped += pcmCarry.size
+                    pcmCarry = ByteArray(0)
                 }
                 // Report the buffer state every 100 chunks. The 对照实现
                 // sender tracks underrun/expiry/overflow separately; this
@@ -2459,21 +2424,6 @@ class AirPlaySender(
          * of lead meant the receiver buffered far more than it needed.
          */
         private const val PCM_LATENCY_MS = 250
-
-        /** Bytes in one PCM sample: 16-bit stereo. */
-        private const val BYTES_PER_PCM_SAMPLE = 4
-
-        /**
-         * How much un-packetised PCM is allowed to back up before trimming.
-         *
-         * 100 ms is a bit over two CarLife source buffers (45.75 ms each), so
-         * the sender can absorb one late delivery without discarding anything,
-         * while a source that is genuinely running ahead still gets bounded.
-         * Small enough that the extra latency is inaudible against a 250 ms
-         * scheduling lead; large enough that ordinary jitter never causes a
-         * gap.
-         */
-        private const val PCM_BACKLOG_LIMIT_MS = 100L
 
         /**
          * The capture exposes these as HAL input/output sample buffers (IL/OL).
