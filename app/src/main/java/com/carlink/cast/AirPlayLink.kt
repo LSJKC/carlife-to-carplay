@@ -22,6 +22,7 @@ import com.carplay.sender.PhonePairing
 import com.carplay.sender.SenderAudioFormat
 import com.carplay.sender.SenderDisplay
 import com.carplay.sender.SenderEvents
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.Closeable
 import java.net.DatagramSocket
@@ -73,6 +74,18 @@ internal class AirPlayLink(
 ) : Closeable {
 
     private val closed = AtomicBoolean()
+    /**
+     * Owns work that must not sit on the sender's activation path.
+     *
+     * Currently just the source launch: `events.startDisplay` is called
+     * synchronously between RECORD and the audio SETUP, so anything it blocks
+     * on is charged directly against the head unit's 13.1 s countdown.
+     * Cancelled in [close] so a session teardown cannot leave a source thread
+     * starting against a socket that is already gone.
+     */
+    private val sourceScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
     private val audioProfiles = AudioProfileMemory(context, peerAddress)
     private val nowPlaying = nowPlayingPublisher ?: NowPlayingPublisher(context, log)
     @Volatile private var nowPlayingSubscription = 0L
@@ -385,10 +398,42 @@ internal class AirPlayLink(
 
         override fun startDisplay(display: SenderDisplay) {
             val current = sender ?: error("发送端尚未就绪")
-            runBlocking {
-                source.startProjection(current::frame)
+            /*
+             * Do not block the sender's activation path here.
+             *
+             * `events.startDisplay` is called synchronously from AirPlaySender
+             * between RECORD and the audio SETUP, so whatever this function
+             * does sits directly on the car's 13.1 s countdown. It used to
+             * `runBlocking` on `source.startProjection`, which waits for
+             * CarLife to open its seven ports — 4.4 s in the field when the
+             * vendor process needs a cold start, measured from
+             *
+             *     10066 RECORD 200
+             *     13076 宿主绑定重试 #1：CarLife 未运行          (+3.0 s)
+             *     15483 CarLife 端口 7/7 已连接                  (+5.4 s)
+             *     16721 画面已发送到车机                         (+6.7 s)
+             *
+             * The car's own reference numbers are EndpointRECORDTimeMs=17 and
+             * TotalSETUP=289 — nothing in this protocol is supposed to take
+             * seconds. Blocking here also delayed the audio SETUP behind it,
+             * which is the other half of "有画面但没声音".
+             *
+             * So the source starts on its own thread and the activation path
+             * continues immediately. Video frames simply begin arriving when
+             * the encoder is ready, which is what the sender already handles
+             * (it drops nothing and holds the stream open with keep-alives
+             * until the first CONFIG/IDR appears).
+             */
+            sourceScope.launch {
+                try {
+                    source.startProjection(current::frame)
+                    log("屏幕 SETUP/RECORD 已完成，已启动画面编码器")
+                } catch (error: Throwable) {
+                    if (!closed.get()) {
+                        log("启动画面来源失败：${error.message ?: error.javaClass.simpleName}")
+                    }
+                }
             }
-            log("屏幕 SETUP/RECORD 已完成，已启动画面编码器")
         }
 
         override fun keyFrameRequested() = source.requestKeyFrame()
@@ -690,6 +735,10 @@ internal class AirPlayLink(
             if (!closed.get() && failed.compareAndSet(false, true)) {
                 val detail = "${error.javaClass.simpleName}: ${error.message ?: "无消息"}"
                 log("AirPlay 会话异常：$detail")
+                // The car dropped us, not the driver. Tell the source before the
+                // close below runs, so its teardown keeps the vendor process
+                // warm instead of paying a cold start on the next attempt.
+                runCatching { source.noteAbnormalEnd() }
                 terminalFailure(error)
                 close()
             }
@@ -724,6 +773,9 @@ internal class AirPlayLink(
             resources.clear()
         }
         nowPlaying.close()
+        // Cancel before interrupting the worker: a source launch still in
+        // flight would otherwise keep opening sockets against a dead session.
+        runCatching { sourceScope.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
         worker?.interrupt()
     }
 

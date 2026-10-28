@@ -72,6 +72,13 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     /** True once this session has taken the CarLife binding back from Honor. */
     private var hostDetached = false
     private var lastRetiredAt = 0L
+    /**
+     * Whether the last session ended because the car dropped it rather than
+     * because the driver stopped projecting. Read by [releaseCarLife] to decide
+     * whether the vendor process is killed (releases the phone's audio route)
+     * or kept warm (makes the next attempt start in 1 s instead of 7 s).
+     */
+    @Volatile private var abnormalEnd = false
 
     /**
      * Panel and safe area to hand CarLife, or null for the bare rectangle.
@@ -160,7 +167,23 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     override fun warmUp(context: Context) {
         lifecycleContext = context.applicationContext
         logCarLifeInstallState(context, "预热")
-        retireCarLifeProcess(context, "预热前清理旧进程")
+        /*
+         * Warm-up must not kill what it is supposed to warm.
+         *
+         * This used to call [retireCarLifeProcess] first, so "预热" was really
+         * "kill, then start again" — the opposite of prewarming, and the reason
+         * a session that began right afterwards still found nothing running:
+         *
+         *     13076 宿主绑定重试 #1：CarLife 未运行且被系统停用
+         *
+         * A live vendor process is exactly the warm state; leave it alone. Only
+         * start one when none is running, and do not wait for it here — the
+         * caller is on a path that must stay responsive.
+         */
+        if (isCarLifeRunning()) {
+            observer?.diagnostic("预热：CarLife 已在运行，保持不动")
+            return
+        }
         startCarLifeHost(context, "预热")
     }
 
@@ -471,7 +494,41 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
         // context is held, never the caller's activity, so nothing leaks.
         hostContext = context.applicationContext
         lifecycleContext = context.applicationContext
-        retireCarLifeProcess(context, "准备新会话")
+        // A new session starts clean: the previous one's ending no longer
+        // decides whether this teardown keeps the vendor process.
+        abnormalEnd = false
+        /*
+         * Reuse a live CarLife; only retire one that cannot be reused.
+         *
+         * This used to kill the vendor process unconditionally and then wait
+         * for a cold start to finish. Measured against the head unit's own
+         * clock that is fatal: the car counts 13.1 s from RECORD, and the kill
+         * + relaunch + encoder build consumed 6.7 s of it before the first
+         * video frame existed —
+         *
+         *     10066 RECORD 200
+         *     13076 宿主绑定重试 #1：CarLife 未运行且被系统停用  (nothing was running)
+         *     15483 CarLife 端口 7/7 已连接                     (+5.4 s)
+         *     16721 画面已发送到车机                            (+6.7 s)
+         *     23089 Connection reset                            (+13.0 s)
+         *
+         * A working sender has the source already producing when the car
+         * activates: the iPhone's own EndpointRECORDTimeMs is 17 ms, and its
+         * TotalSETUP is 289 ms. Nothing about the protocol needs seconds — all
+         * of ours were spent waiting on a process this code had just killed.
+         *
+         * So a CarLife that is already up and whose ports answer is reused as
+         * is. [retireCarLifeProcess] still runs for a session that genuinely
+         * needs a clean process (different negotiated geometry, or a previous
+         * session that ended abnormally).
+         */
+        val reusing = isCarLifeRunning()
+        if (reusing) {
+            observer?.diagnostic("准备会话：CarLife 已在运行且端口可用，直接复用，不重启进程")
+            lastRetiredAt = 0L
+        } else {
+            retireCarLifeProcess(context, "准备新会话")
+        }
 
         // Set the bridge sink before asking CarLife to bind, so the bind
         // confirmation and anything CarLife reports shows up in the log. The
@@ -1232,6 +1289,16 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
         session?.key(carLife)
     }
 
+    /**
+     * Marks the next teardown as an abnormal one, so [releaseCarLife] keeps the
+     * vendor process instead of killing it.
+     *
+     * Set from the sender's failure path before [stopProjection] runs.
+     */
+    override fun noteAbnormalEnd() {
+        abnormalEnd = true
+    }
+
     override suspend fun stopProjection() {
         try {
             synchronized(lifecycleLock) {
@@ -1344,6 +1411,32 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
     private fun releaseCarLife() {
         val context = hostContext ?: lifecycleContext ?: return
         cancelHostRetry()
+        /*
+         * A session the car tore down keeps CarLife warm.
+         *
+         * CarLife has to be stopped when the driver ends the session, because it
+         * is still holding the phone's audio route and every other app stays
+         * silent until it goes. That is the "手机没声了" report and it is the
+         * reason this teardown exists.
+         *
+         * But the same teardown also ran after every abnormal disconnect, and
+         * those are the sessions being measured: the car resets at 13.1 s, this
+         * app kills CarLife, and the next attempt starts from a cold vendor
+         * process — 5.4 s before its ports answer and 6.7 s before the first
+         * frame, all of it inside the next 13.1 s window. Killing it here is
+         * what made every retry as slow as the first one.
+         *
+         * On an abnormal end the phone's audio route is not the problem worth
+         * solving; a warm source is. Keep the process and only let go of the
+         * host binding, so the next session reuses it (prepare() checks
+         * isCarLifeRunning() and skips the relaunch).
+         */
+        val keepWarm = abnormalEnd
+        if (keepWarm) {
+            observer?.diagnostic(
+                "会话异常结束：保留 CarLife 进程以便下次快速重连（不释放音频通道）",
+            )
+        }
         runCatching {
             val stopped = context.stopService(connectIntent(context))
             observer?.diagnostic("停止 CarLife 连接服务：返回=$stopped")
@@ -1352,11 +1445,13 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
             val stopped = context.stopService(Intent(context, CarLifeHostService::class.java))
             observer?.diagnostic("停止 CarLink 宿主服务：返回=$stopped")
         }.onFailure { observer?.diagnostic("停止 CarLink 宿主服务失败：${it.message}") }
-        runCatching {
-            val manager = context.getSystemService(android.app.ActivityManager::class.java)
-            manager?.killBackgroundProcesses(CARLIFE_PACKAGE)
-            observer?.diagnostic("已释放 CarLife，交还手机音频通道")
-        }.onFailure { observer?.diagnostic("释放 CarLife 失败：${it.message}") }
+        if (!keepWarm) {
+            runCatching {
+                val manager = context.getSystemService(android.app.ActivityManager::class.java)
+                manager?.killBackgroundProcesses(CARLIFE_PACKAGE)
+                observer?.diagnostic("已释放 CarLife，交还手机音频通道")
+            }.onFailure { observer?.diagnostic("释放 CarLife 失败：${it.message}") }
+        }
         CarLifeBridge.resetForNewSession()
         /*
          * Also let go of Honor's launcher.
@@ -1564,11 +1659,21 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
 
         /**
          * How long to keep asking CarLife to bind while it finishes launching.
-         * CarLife drops requests that arrive within three seconds of the last
-         * one, so the interval stays above that.
+         *
+         * CarLife debounces a repeated connect request inside three seconds, so
+         * this cannot simply be shortened: a retry that lands inside that window
+         * is discarded, which is why the interval sat at 3.2 s.
+         *
+         * The mistake was relying on it at all. Three seconds of every session
+         * went to waiting for a retry to fire while the head unit was already
+         * counting down from RECORD. The fix is upstream — [warmUp] no longer
+         * kills a running CarLife and [prepare] reuses one — so this timer is
+         * now only a safety net for the genuinely cold case, and only has to
+         * cover the launch that is already under way.
+         *
+         * 30 attempts at 3.2 s covers roughly 96 s, long enough for Honor
+         * CarLife to finish a cold process start without issuing a tight loop.
          */
-        // 30 attempts at 3.2s covers roughly 96s, long enough for Honor
-        // CarLife to finish a cold process start without issuing a tight loop.
         const val HOST_NOTIFY_ATTEMPTS = 30
         const val HOST_NOTIFY_INTERVAL_MS = 3_200L
         const val HOST_START_DEBOUNCE_MS = 2_500L

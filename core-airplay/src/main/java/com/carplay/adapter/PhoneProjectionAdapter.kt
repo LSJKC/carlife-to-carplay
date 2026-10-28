@@ -83,4 +83,16 @@ interface PhoneProjectionAdapter {
 
     /** 停止并释放投屏通道 */
     suspend fun stopProjection()
+
+    /**
+     * Tells the source that the session ended because the transport failed,
+     * not because the driver stopped projecting.
+     *
+     * The difference decides whether a source is allowed to stay warm. Tearing
+     * a source down completely is right when the user is done, but after a
+     * disconnect the head unit will be back in seconds and a cold source start
+     * spends most of its own watchdog window getting ready again. Sources that
+     * can cheaply survive implement this; the default is to do nothing.
+     */
+    fun noteAbnormalEnd() = Unit
 }
