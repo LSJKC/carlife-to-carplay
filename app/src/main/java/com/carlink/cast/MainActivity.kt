@@ -1362,7 +1362,124 @@ class MainActivity : AppCompatActivity() {
             }
         }, LinearLayout.LayoutParams(0, dp(44f), 1f))
         content.addView(actions, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16f) })
+        /*
+         * Bundled wallpapers, one row below the picker.
+         *
+         * The picker is the flexible path but it needs the driver to already
+         * own a 1972×520 image; almost nobody does, so the feature looked
+         * broken. These are the same nine images 对照实现 ships, cropped to
+         * the panel by [BuiltInWallpapers] instead of by the user.
+         */
+        content.addView(secondaryButton(getString(R.string.wallpaper_builtin)).apply {
+            setOnClickListener {
+                sheet.dismiss()
+                showBuiltInWallpaperSheet()
+            }
+        }, LinearLayout.LayoutParams(-1, dp(44f)).apply { topMargin = dp(8f) })
         sheet.show()
+    }
+
+    /**
+     * Grid of the bundled wallpapers.
+     *
+     * Applying is done off the UI thread: each entry is a multi-megapixel JPEG
+     * that has to be decoded, scaled and cropped, which is long enough to drop
+     * frames if it ran inline.
+     */
+    private fun showBuiltInWallpaperSheet() {
+        val (sheet, content) = sheetContent()
+        content.addView(sheetTitle(getString(R.string.wallpaper_builtin)))
+        content.addView(TextView(this).apply {
+            text = getString(R.string.wallpaper_builtin_note)
+            style(11f, R.color.text_tertiary)
+            setLineSpacing(dp(2f).toFloat(), 1f)
+            setPadding(0, dp(2f), 0, dp(10f))
+        })
+
+        val columns = 3
+        var row: LinearLayout? = null
+        BuiltInWallpapers.entries.forEachIndexed { index, entry ->
+            if (index % columns == 0) {
+                row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                content.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8f) })
+            }
+            row?.addView(builtInWallpaperTile(entry) { sheet.dismiss() },
+                LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    marginEnd = if (index % columns == columns - 1) 0 else dp(8f)
+                })
+        }
+        sheet.show()
+    }
+
+    private fun builtInWallpaperTile(
+        entry: BuiltInWallpapers.Entry,
+        onApplied: () -> Unit,
+    ): View {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = selectableBackground()
+            isClickable = true
+            isFocusable = true
+        }
+        val preview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(color(R.color.surface_high))
+        }
+        val height = (resources.displayMetrics.widthPixels / 3.4).toInt()
+            .coerceAtLeast(dp(56f))
+        tile.addView(preview, LinearLayout.LayoutParams(-1, height))
+        tile.addView(TextView(this).apply {
+            text = entry.label
+            style(11f, R.color.text_secondary)
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(6f), 0, 0)
+        }, LinearLayout.LayoutParams(-1, -2))
+
+        // Thumbnails are decoded lazily at tile size; decoding nine full-size
+        // JPEGs just to show a grid would cost more memory than the panel.
+        scope.launch(Dispatchers.IO) {
+            val bitmap = runCatching {
+                assets.open(entry.asset).use { stream ->
+                    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeStream(stream, null, bounds)
+                    val sample = (bounds.outWidth / 480).coerceAtLeast(1)
+                    assets.open(entry.asset).use { second ->
+                        android.graphics.BitmapFactory.decodeStream(
+                            second, null,
+                            android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
+                        )
+                    }
+                }
+            }.getOrNull()
+            launch(Dispatchers.Main) {
+                if (!isFinishing && !isDestroyed) preview.setImageBitmap(bitmap)
+            }
+        }
+
+        tile.setOnClickListener {
+            it.isEnabled = false
+            scope.launch(Dispatchers.IO) {
+                val applied = BuiltInWallpapers.apply(this@MainActivity, entry)
+                launch(Dispatchers.Main) {
+                    it.isEnabled = true
+                    if (applied) {
+                        toast(getString(R.string.toast_wallpaper_saved))
+                        onApplied()
+                    } else {
+                        // PanelWallpaperStore only replaces the file after the
+                        // new one is written, so a failure here leaves the
+                        // previous wallpaper in place — say so rather than
+                        // implying the panel is now blank.
+                        toast(getString(R.string.wallpaper_builtin_failed))
+                    }
+                }
+            }
+        }
+        return tile
     }
 
     private fun showWallpaperCropSheet(bitmap: android.graphics.Bitmap) {
