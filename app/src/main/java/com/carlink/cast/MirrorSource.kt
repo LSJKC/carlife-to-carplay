@@ -157,8 +157,14 @@ internal class MirrorSource(private val context: Context) : PhoneProjectionAdapt
             // A
             // sync frame every second on a large raster is a third of the
             // bitrate spent on redundancy. The car asks for one explicitly
-            // whenever its decoder actually needs it.
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
+            // One-second GOP, matching the 对照实现 sender (Yo.java) which
+            // keeps this car connected. max-bframes=0 and
+            // repeat-previous-frame-after come from the same block: no
+            // B-frames (each is reorder latency) and a 100 ms keep-alive frame
+            // so a stalled source does not leave the receiver waiting.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger("max-bframes", 0)
+            setLong("repeat-previous-frame-after", 100_000L)
             if (Build.VERSION.SDK_INT >= 29) setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
         }
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)

@@ -173,13 +173,56 @@ internal class NowPlayingPublisher(
             }
             if (request.playback.isNotEmpty()) {
                 group(1) {
+                    /*
+                     * Field ids below 12 are from the 对照实现 sender's
+                     * NowPlaying encoder (`Tg.b()`), which is the one this car
+                     * answers to:
+                     *
+                     *     0  player state
+                     *     1  position (u32)
+                     *     2  queue index
+                     *     3  queue length
+                     *     7  app name
+                     *     12 volume (0..65535)
+                     *     13, 14  zero
+                     *     16 title
+                     *
+                     * Fields 2/3 are sent as 0/1 rather than omitted: a
+                     * receiver that renders "n of m" treats a missing index as
+                     * "unknown track" and leaves the card unpopulated.
+                     */
                     if (0 in request.playback) u8(0, snapshot.state.coerceIn(0, 2))
                     if (1 in request.playback) u32(1, snapshot.positionMs.coerceIn(0, 0xffff_ffffL))
+                    if (2 in request.playback) u32(2, 0)
+                    if (3 in request.playback) u32(3, 1)
                     if (7 in request.playback) string(7, snapshot.app)
+                    if (12 in request.playback) u16(12, volumeField())
+                    if (13 in request.playback) u32(13, 0)
+                    if (14 in request.playback) u32(14, 0)
                     if (16 in request.playback) string(16, snapshot.app)
                 }
             }
         }
+
+    /**
+     * Volume as the receiver expects it: 0..65535, 0xFFFF = full scale.
+     *
+     * Read from the media stream itself so the car's card matches the phone's
+     * slider. A session with no readable stream reports full scale rather than
+     * zero — reporting 0 makes the car render a muted card.
+     */
+    private fun volumeField(): Int {
+        val stream = runCatching {
+            appContext.getSystemService(android.media.AudioManager::class.java)
+                ?.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        }.getOrNull() ?: return 0xffff
+        val max = runCatching {
+            appContext.getSystemService(android.media.AudioManager::class.java)
+                ?.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        }.getOrNull() ?: return 0xffff
+        if (max <= 0) return 0xffff
+        return ((stream.toLong() * 0xffffL) / max).toInt().coerceIn(0, 0xffff)
+    }
 
     private fun persistentId(snapshot: Snapshot): ByteArray {
         var hash = FNV_OFFSET

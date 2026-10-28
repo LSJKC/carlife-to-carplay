@@ -500,7 +500,22 @@ internal class AirPlayLink(
                              */
                             identifyRetries++
                             identifyRequested++
-                            control.begin()
+                            /*
+                             * Alternate the opening message.
+                             *
+                             * Attempt 1 sends 0xAA06 ("give me your
+                             * certificate"), which is what the 对照实现
+                             * sender opens with; attempts 2 and 3 fall back to
+                             * the existing 0x1D00 ordering. Keeping both on the
+                             * wire is what tells them apart in one session: if
+                             * the car ever answers, the log says which message
+                             * it answered.
+                             */
+                            if (identifyRetries == 1 && !control.status().identified) {
+                                control.requestCertificate()
+                            } else {
+                                control.begin()
+                            }
                             nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_000)
                             val stage = control.status()
                             log(
@@ -518,19 +533,45 @@ internal class AirPlayLink(
                             )
                         }
                         /*
-                         * The car restarted its iAP2 link. Replay the whole
-                         * bootstrap: authentication, identification and the
-                         * handlers all belonged to the old link. Without this
-                         * the new link comes up and stays silent — measured on
-                         * 1.2.91, LINK-RESTART at 24130 ms, no 0xAA00 after it,
-                         * connection reset 2.9 s later.
+                         * The car restarted its iAP2 link.
+                         *
+                         * The 对照实现 sender states the rule this car
+                         * actually wants (`V0`):
+                         *
+                         *   "IAPLINK: 网络认证及状态 ACK 就绪；不重发 RECORD、
+                         *    不改变屏幕归属"
+                         *
+                         * and it separates two link states, `status-acked` and
+                         * `network-ready`. Every earlier build here did the
+                         * opposite: it replayed the entire bootstrap — 0xAA00,
+                         * 0x1D00, the lot — on every restart. Field captures
+                         * show that restart arriving 10.0 s after RECORD with
+                         * the session torn down 2.9 s later, at 13084/13089/
+                         * 13108 ms across sessions; a sender that stays up does
+                         * not do that work at all.
+                         *
+                         * So: if this link was already identified, keep quiet —
+                         * reset only the link layer's own bookkeeping and wait.
+                         * Only a link that never finished identification needs
+                         * the bootstrap replayed.
                          */
                         if (linkRestarted.compareAndSet(true, false)) {
-                            log("重新执行 iAP2 引导：认证 → 识别")
+                            val wasIdentified = control.status().identified
                             control.restartForNewLink()
                             identifyRetries = 0
-                            nextIdentifyRetry = System.nanoTime()
-                            control.begin()
+                            if (wasIdentified) {
+                                // Mark as already handled: the bootstrap below
+                                // is skipped, so nothing new goes on the wire.
+                                log(
+                                    "车机重启了 iAP2 链路：本链路已完成识别，按参考实现静默重连" +
+                                        "（不重发 0x1D00、不改屏幕归属）",
+                                )
+                                nextIdentifyRetry = Long.MAX_VALUE
+                            } else {
+                                log("车机重启了 iAP2 链路：本链路未完成识别，重放引导")
+                                nextIdentifyRetry = System.nanoTime()
+                                control.begin()
+                            }
                         }
                         val frame = runtime.recv(1000) ?: continue
                         csmReceived++

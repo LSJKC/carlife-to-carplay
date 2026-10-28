@@ -77,11 +77,15 @@ object SenderNegotiation {
      * Picks the media stream from the formats the head unit actually advertises.
      *
      * Buick E2LB advertises both `type=100/media` PCM and
-     * `type=102/media` AAC-LC.  The real iPhone path uses the latter; selecting
-     * PCM merely because it appears first produces a successful SETUP with no
-     * audible output on this receiver.  Other receivers retain the historical
-     * PCM-first ordering unless the caller explicitly opts into the high-quality
-     * media profile.
+     * `type=102/media` AAC-LC. The 对照实现 sender — the one known to hold a
+     * session open on this car class — drives **PCM** as its main path
+     * (`C0142f1.E()` selects `type == 100` and falls back to a 48 kHz baseline
+     * when `/info` declares nothing usable), and its own diagnostic strings say
+     * "✓ 音频流协商成功（type=100". This sender therefore prefers PCM by
+     * default and keeps AAC as the fallback, which is the reverse of the
+     * previous order.
+     *
+     * `preferAacMedia` still forces AAC first, for head units that reject PCM.
      */
     fun audio(info: Map<*, *>, preferAacMedia: Boolean = false): SenderAudioFormat {
         return audioCandidates(info, preferAacMedia).firstOrNull()
@@ -118,10 +122,10 @@ object SenderNegotiation {
             if (aac.isNotEmpty()) return aac
         }
 
-        // **CRITICAL FIX**: Some HUs declare type 100 but with incorrect
-        // audioOutputFormats bits. Always try LPCM 48kHz first if type 100
-        // exists, regardless of the bits field only when it explicitly has a
-        // playable PCM output mask.
+        // PCM first, matching the 对照实现 sender's main path. Some HUs
+        // declare type 100 with a zero output mask; those entries are skipped
+        // rather than trusted, because an input-only description produces an
+        // accepted SETUP with no audible output.
         val pcm = media.filter { (it["type"] as? Number)?.toInt() == 100 }.flatMap { entry ->
             // Prefer 48 kHz; fallback to 44.1 kHz if 48 fails
             listOf(48_000 to 0x8000L, 44_100 to 0x800L).mapNotNull { (rate, flag) ->
@@ -137,18 +141,21 @@ object SenderNegotiation {
         }
         val orderedPcm = pcm.sortedByDescending { it.sampleRate }
         val aac = aacCandidates()
+        // PCM is preferred; AAC remains the fallback for receivers that refuse it.
         return if (orderedPcm.isNotEmpty()) orderedPcm + aac else aac
     }
 
     /**
      * Samples per LPCM RTP packet.
      *
-     * 240 = 5 ms at 48 kHz, which is what a working sender on this exact head
-     * unit negotiates (both of its LPCM streams carry `spf: 240, sr: 48000,
-     * ct: 1`). The previous 352 was the Buick-E5 sender's shape and is not what
-     * this car is fed.
+     * 352 = 7.33 ms at 48 kHz. This is the value the 对照实现 sender
+     * negotiates on this car class and the one its audio pipeline is built
+     * around (`D3.java`: "，每包 352 帧"). An earlier build used 240 (5 ms)
+     * from a different reference sender; both are accepted by the receiver,
+     * but 352 is what a sender known to stay connected uses, so it is the
+     * default here.
      */
-    const val PCM_SAMPLES_PER_PACKET = 240
+    const val PCM_SAMPLES_PER_PACKET = 352
 }
 
 /** Binary data from a verified iAP command or that command's response; never infer proof from ACKs. */

@@ -423,12 +423,26 @@ class AirPlaySender(
             "sourceVersion" to "320.17",
             "sessionUUID" to java.util.UUID.randomUUID().toString(),
             "timingPort" to timingPort,
-            // The iPhone's own session uses the Standard keep-alive type while
-            // it is streaming — 2017 ms between datagrams — and only switches
-            // to LowPowerOnIdle (10 s) when idle. Asking for low power from the
-            // start tells the car to relax its watchdog while we are actively
-            // sending, which is the wrong side of that trade.
-            "keepAliveLowPower" to false,
+            /*
+             * Three keys the 对照实现 sender sends and this one did not.
+             *
+             * Its SETUP (`C0142f1.I()`) builds exactly:
+             *
+             *     "statsCollectionEnabled" -> false
+             *     "keepAliveLowPower"      -> true
+             *     "sessionCorrelationUUID" -> <uuid>
+             *
+             * `statsCollectionEnabled=false` stops the car expecting periodic
+             * statistics on the feedback channel. `keepAliveLowPower=true`
+             * selects the relaxed keep-alive profile — the earlier comment here
+             * argued the opposite, but the sender that actually holds this car
+             * open asks for low power from the start, and its keep-alive is an
+             * explicit ping rather than a tight cadence.
+             * `sessionCorrelationUUID` ties this SETUP to the iAP2 session.
+             */
+            "statsCollectionEnabled" to false,
+            "keepAliveLowPower" to true,
+            "sessionCorrelationUUID" to java.util.UUID.randomUUID().toString(),
             "features" to CONTROLLER_FEATURES,
         )), plistHeaders).body)
         val enabledFeatures = (setup["enabledFeatures"] as? List<*>)
@@ -1237,6 +1251,12 @@ class AirPlaySender(
                 "inputBufferSamples=${if (format.isPcm) PCM_INPUT_BUFFER_SAMPLES else AAC_INPUT_BUFFER_SAMPLES} " +
                 "outputBufferSamples=${if (format.isPcm) PCM_OUTPUT_BUFFER_SAMPLES else AAC_OUTPUT_BUFFER_SAMPLES} " +
                 "streamConnectionID=$responseSeed",
+        )
+        events.diagnostic(
+            "音频参数对照（对照实现 同款）：每包 ${format.samplesPerPacket} 帧" +
+                "（${"%.2f".format(1000.0 * format.samplesPerPacket / format.sampleRate)} ms）、" +
+                "延迟 ${if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS} ms、" +
+                "RTP Marker=固定 0、音频 RTCP=不发送",
         )
         /*
          * Do not send RTP↔NTP sync packets.
@@ -2201,13 +2221,14 @@ class AirPlaySender(
         /**
          * Scheduling lead for LPCM.
          *
-         * 100 ms is what a working sender on this head unit negotiates on both
-         * of its LPCM streams (`audioLatencyMs: 100`). The previous 1000 was a
-         * guess that came from a trace of a different firmware; with 5 ms
-         * packets it also meant the receiver buffered a full second before
-         * starting, which is what made audio feel late and then stall.
+         * 250 ms is what the 对照实现 sender negotiates on its default audio
+         * profile (`E()` -> `N0(48000, 32768L, 250L, "media", ...)`), and that
+         * sender is the one known to hold a session open on this car class.
+         * Earlier values here were 100 (a different reference) and 1000 (a
+         * guess from another firmware); with 352-sample packets a full second
+         * of lead meant the receiver buffered far more than it needed.
          */
-        private const val PCM_LATENCY_MS = 100
+        private const val PCM_LATENCY_MS = 250
 
         /**
          * The capture exposes these as HAL input/output sample buffers (IL/OL).

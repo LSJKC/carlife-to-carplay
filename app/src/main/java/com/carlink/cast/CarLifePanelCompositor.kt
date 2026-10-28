@@ -419,36 +419,71 @@ internal class CarLifePanelCompositor(
         }
     }
 
-    /** Seconds between the encoder's own IDRs; real key frames are requested on demand. */
-    private val keyFrameIntervalSeconds = 5
+    /**
+     * Seconds between the encoder's own IDRs.
+     *
+     * Back to 1, matching the 对照实现 sender (`Yo.java`:
+     * `setInteger("i-frame-interval", 1)`), which is the sender known to hold
+     * this car's session open. 1.2.96 raised this to 5 on the theory that
+     * frequent key frames were starving the link; the reference that actually
+     * stays connected uses 1, so the shorter interval is not the problem — the
+     * encoder's other settings were. Explicit key frames are still requested on
+     * demand through [requestEncoderSyncFrame].
+     */
+    private val keyFrameIntervalSeconds = 1
+
+    /**
+     * Clamps the requested bitrate to what this encoder actually supports.
+     *
+     * The 对照实现 sender reads `getBitrateRange()` from the codec and clamps
+     * into it before building the format. Handing a codec a rate it cannot
+     * honour either throws or gets silently rounded, and either way the car's
+     * buffer math no longer matches what was negotiated.
+     */
+    private fun clampedBitrate(): Int = runCatching {
+        val range = MediaCodec.createEncoderByType(MIME_AVC)
+            .codecInfo.getCapabilitiesForType(MIME_AVC)
+            .videoCapabilities.bitrateRange
+        ENCODER_BIT_RATE.coerceIn(range.lower, range.upper)
+    }.getOrElse { ENCODER_BIT_RATE }
 
     private fun initializeEncoder() {
         fun buildFormat(bitrateMode: Int?): MediaFormat =
             MediaFormat.createVideoFormat(MIME_AVC, outputWidth, outputHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, ENCODER_BIT_RATE)
+                setInteger(MediaFormat.KEY_BIT_RATE, clampedBitrate())
                 setInteger(MediaFormat.KEY_FRAME_RATE, outputFps)
-                /*
-                 * A five-second GOP, not one.
-                 *
-                 * `KEY_I_FRAME_INTERVAL = 1` made this encoder emit a sync
-                 * frame every single second regardless of content. On a
-                 * 1972x520 canvas those measure 250-320 KB each — measured at
-                 * a 998-1006 ms cadence across the 1.2.93 field logs — which
-                 * is roughly 2.5 Mbps of key frames on top of the P frames,
-                 * a third of the encoder's whole 8 Mbps budget spent on
-                 * redundancy.
-                 *
-                 * The car does not need them that often: a decoder only needs
-                 * a sync frame when it starts, when it rebinds, or when the
-                 * screen is handed back. Every one of those cases goes through
-                 * [requestEncoderSyncFrame], which asks the encoder directly.
-                 * The periodic interval is only a safety net for a decoder that
-                 * missed a request, so it can afford to be long.
-                 */
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyFrameIntervalSeconds)
+                /*
+                 * The three settings below are copied from the 对照实现
+                 * sender's encoder block; none of them existed here before.
+                 *
+                 *  - `max-fps-to-encoder` pins the encoder to the negotiated
+                 *    rate instead of letting it run ahead and buffer.
+                 *  - `repeat-previous-frame-after` = 100 ms keeps the stream
+                 *    alive through a gap: without it a stalled source makes the
+                 *    receiver wait for a frame that never arrives.
+                 *  - `max-bframes` = 0 removes B-frames entirely. B-frames
+                 *    reorder presentation, and this receiver decodes a live
+                 *    30 fps stream — every B-frame is latency the car did not
+                 *    ask for.
+                 */
+                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, outputFps.toFloat())
+                setLong("repeat-previous-frame-after", 100_000L)
+                setInteger("max-bframes", 0)
+                setInteger("priority", 0)
                 bitrateMode?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
             }
+
+        /**
+         * Clamps the requested bitrate to what this encoder actually supports.
+         *
+         * The 对照实现 sender reads `getBitrateRange()` from the codec and
+         * clamps into it before building the format. Handing a codec a rate it
+         * cannot honour either throws or gets silently rounded, and either way
+         * the car's buffer math no longer matches what was negotiated.
+         */
+
         /*
          * Constant bitrate, so a key frame cannot blow past the budget.
          *
@@ -469,6 +504,7 @@ internal class CarLifePanelCompositor(
             codec.reset()
             codec.configure(buildFormat(null), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
+
         encoder = codec
         val input = codec.createInputSurface()
         codec.start()
@@ -876,7 +912,22 @@ internal class CarLifePanelCompositor(
             val format = codec.outputFormat
             if (!firstOutputFormatLogged) {
                 firstOutputFormatLogged = true
-                log("全画布编码器输出格式已就绪：$format")
+                /*
+                 * Print the settings this build actually asked for, next to
+                 * what the codec reports back.
+                 *
+                 * Every value here came from the 对照实现 sender and cannot
+                 * be confirmed from a session log otherwise: a codec is free to
+                 * ignore `max-bframes` or round the bitrate, and the only way
+                 * to tell "we set it" from "the codec honoured it" is to log
+                 * both sides at the moment the format is known.
+                 */
+                log(
+                    "全画布编码器输出格式已就绪：$format\n" +
+                        "  请求参数：bitrate=${clampedBitrate()}（原设 $ENCODER_BIT_RATE）" +
+                        " fps=$outputFps gop=${keyFrameIntervalSeconds}s" +
+                        " max-bframes=0 repeat-after=100ms",
+                )
             }
             val config = configFromFormat(format)
             if (config != null) {

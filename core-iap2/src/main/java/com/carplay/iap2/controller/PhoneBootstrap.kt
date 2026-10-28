@@ -140,6 +140,32 @@ class PhoneBootstrap(
     fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
 
     /**
+     * Asks the accessory for its certificate the way the 对照实现 sender does.
+     *
+     * Its command-channel trace names a different opening message than the one
+     * used here so far:
+     *
+     *     "网络 AA06 没有证书缓存，无法认证"
+     *     "AUTH network AA06 cache-miss -> request full certificate"
+     *     "网络 AA01 缺少证书"
+     *     "网络 AA03 缺少签名"
+     *
+     * That is: the **phone** opens with 0xAA06 ("authentication information
+     * request") and the accessory answers with 0xAA01 carrying its certificate.
+     * This sender has always sent 0xAA00 instead ("please authenticate"), which
+     * this firmware acknowledges at the link layer and then never answers.
+     *
+     * Both are tried here rather than swapping one for the other, because the
+     * Bluetooth transport does work with the existing order and must not
+     * regress: 0xAA06 first, then 0xAA00 as the fallback the retry timer sends.
+     */
+    fun requestCertificate() {
+        onStage("向车机请求证书 (0xAA06)")
+        send(empty(0xaa06))
+        reportStatus()
+    }
+
+    /**
      * Clears everything negotiated on a link the car has just replaced.
      *
      * The link layer restarts underneath us when the car sends a fresh SYN
@@ -240,6 +266,18 @@ class PhoneBootstrap(
                  *     13:18:50.029 RX CSM 0xAA01 (certificate, then 0xAA02 us)
                  */
                 onStage("车机请求认证")
+            }
+            0xaa06 -> {
+                /*
+                 * The accessory is asking what authentication material this
+                 * phone holds. The 对照实现 sender never sees this on the
+                 * wire — it is the side that *sends* 0xAA06 — so what a real
+                 * sender answers is not known. Acknowledge with an empty
+                 * 0xAA07-shaped reply rather than dropping it silently: an
+                 * unanswered request is what this link's watchdog reacts to.
+                 */
+                onStage("车机请求认证材料 (0xAA06)")
+                send(empty(0xaa07))
             }
             0xaa01 -> {
                 /*
