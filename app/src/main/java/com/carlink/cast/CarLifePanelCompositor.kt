@@ -977,7 +977,20 @@ internal class CarLifePanelCompositor(
         val changed = outputAvcC?.contentEquals(config) != true
         outputAvcC = config.copyOf()
         outputConfig?.invoke(config.copyOf())
-        if (changed) log("全画布编码 CONFIG 就绪：${config.size}B，${outputWidth}x$outputHeight")
+        if (changed) {
+            /*
+             * Print the SPS/PPS alongside the geometry.
+             *
+             * The car sets up its decoder from the size it agreed over AirPlay
+             * and silently drops a stream whose SPS disagrees. When the picture
+             * is missing but frames are flowing, these bytes are the only way to
+             * tell "wrong size" from "wrong level/profile" without a capture.
+             */
+            log(
+                "全画布编码 CONFIG 就绪：${config.size}B，${outputWidth}x$outputHeight，" +
+                    "SPS/PPS=${config.take(24).joinToString(" ") { "%02X".format(it) }}",
+            )
+        }
     }
 
     private fun requestEncoderSyncFrame() {

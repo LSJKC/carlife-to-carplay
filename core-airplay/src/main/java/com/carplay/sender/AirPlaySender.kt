@@ -418,6 +418,30 @@ class AirPlaySender(
         fun key(salt: String, label: String) = AirPlayCrypto.hkdfSha512(shared, salt.toByteArray(), label.toByteArray())
         wire.cipher = ControlCipher(key("Control-Salt", "Control-Read-Encryption-Key"), key("Control-Salt", "Control-Write-Encryption-Key"))
         val timingPort = clock.listen(); resources += clock
+        /*
+         * Announce which screen this sender intends to drive, before asking
+         * for it.
+         *
+         * The 对照实现 sender does the same and names the step in its own
+         * log — "确认车机初始屏幕归属，再申请连接显示" — and it keeps a
+         * distinct `status-acked` phase so it never re-announces ownership once
+         * the car has answered. Asking for the screen without saying who owns
+         * it first is what made this car treat the SETUP as a hostile grab.
+         *
+         * The body is the same shape used for later changeModes notifications,
+         * so the car sees one consistent ownership statement.
+         */
+        runCatching {
+            wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
+        }.onSuccess {
+            events.diagnostic(
+                "已确认车机初始屏幕归属，再申请连接显示：" +
+                    "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
+                    "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
+            )
+        }.onFailure {
+            events.diagnostic("初始屏幕归属声明失败（继续 SETUP）：${it.message}")
+        }
         val setup = plist(wire.request("SETUP", "/", encode(mapOf(
             "deviceID" to identity.id,
             "name" to "CarPlay Android",

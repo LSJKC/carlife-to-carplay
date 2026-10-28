@@ -163,11 +163,33 @@ object CastLog {
         persistSnapshot()
     }
 
+
+    /**
+     * How many events the in-memory snapshot keeps.
+     *
+     * The disk journal is append-only and unbounded per session; this only
+     * bounds what the UI and the exported JSON hold, so a whole session fits.
+     */
+    private const val MAX_EVENTS_IN_MEMORY = 3000
+
     @Synchronized fun event(level: String, message: String) {
         val now = System.currentTimeMillis()
         val event = CastEvent((now - startedAt).coerceAtLeast(0), level, message.take(2000))
         val current = mutable.value
-        mutable.value = current.copy(events = (current.events + event).takeLast(300))
+        /*
+         * Keep far more history than one screenful.
+         *
+         * 300 events was not enough to hold a whole session: the handshake
+         * lines, the first key frame and the teardown never coexisted in the
+         * same file, which is why so many earlier diagnoses had to infer the
+         * opening from the closing. A field session produces roughly 400-900
+         * events, so 3000 holds one whole run with room to spare, and the
+         * journal on disk (appendJournal below) already has no such limit.
+         */
+        val merged = current.events + event
+        mutable.value = current.copy(
+            events = if (merged.size > MAX_EVENTS_IN_MEMORY) merged.takeLast(MAX_EVENTS_IN_MEMORY) else merged,
+        )
         appendJournal(event, forceSync = level == "ERROR" || level == "FATAL" || level == "WARN")
         if (level == "ERROR" || level == "FATAL" || now - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS ||
             !mutable.value.running
