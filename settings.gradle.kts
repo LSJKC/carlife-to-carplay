@@ -29,6 +29,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "carlink-cast"
 include(":app")
+include(":monitor")
 include(":core-iap2")
 include(":core-airplay")
 include(":adapter-carlife")

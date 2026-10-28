@@ -1,0 +1,210 @@
+package com.carlink.monitor
+
+import java.io.File
+
+/**
+ * 一次采样的完整快照。
+ *
+ * 所有字段都是原始读数，判断逻辑放在 [Verdict] 里，这样采样和解读可以分开
+ * 验证：采样错了看一眼就知道，判断错了能单独改。
+ */
+data class Sample(
+    val atMillis: Long,
+    val processes: List<ProcInfo>,
+    val sockets: List<SocketInfo>,
+    val encoderRefs: Int?,
+    val carLifeLayers: Int?,
+    val audioMode: String?,
+    val fdCounts: Map<Int, Int?>,
+    val errors: List<String> = emptyList(),
+) {
+    val hasRoot: Boolean get() = errors.none { it == Sampler.ERR_NO_ROOT }
+}
+
+data class ProcInfo(
+    val pid: Int,
+    val ppid: Int,
+    val name: String,
+    /** R/S/D/Z/T — Z is a zombie and the single most important value here. */
+    val state: Char,
+    val cpuMillis: Long,
+    val rssKb: Long,
+    val threads: Int,
+) {
+    val isDead: Boolean get() = state == 'Z' || state == 'X' || state == 'x'
+}
+
+data class SocketInfo(
+    val port: Int,
+    val state: String,
+    val txQueue: Long,
+    val rxQueue: Long,
+)
+
+/**
+ * 采样器。只读，不写、不改、不停任何东西。
+ *
+ * 全部通过 `su -c` 跑，不依赖应用自身的权限：CarLife 是别的应用，读它的
+ * /proc/<pid>/{stat,fd} 和 dumpsys 都要求 root。用 root 也意味着不碰任何
+ * 应用数据目录，只读系统公开的运行时状态。
+ */
+class Sampler(private val runner: Shell = RootShell()) {
+
+    fun sample(): Sample {
+        val now = System.currentTimeMillis()
+        val errors = mutableListOf<String>()
+
+        if (runner.run("id -u")?.trim() != "0") {
+            // 没有 root 也要出结果：进程列表在 Android 10+ 被限制成只能看
+            // 自己的，但至少能报「没有 root」而不是静默返回空列表冒充
+            // 「CarLife 没在跑」，那是两种完全不同的结论。
+            return Sample(now, emptyList(), emptyList(), null, null, null, emptyMap(),
+                listOf(ERR_NO_ROOT))
+        }
+
+        val processes = readProcesses(errors)
+        val sockets = readSockets(errors)
+        val encoder = readCount(
+            "dumpsys media.codec 2>/dev/null | grep -c 'c2.qti.avc.encoder'", errors,
+        )
+        val layers = readCount(
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -icE 'carlife|carlink|hihonor\\.auto'",
+            errors,
+        )
+        val audio = runner.run("dumpsys audio 2>/dev/null | grep -m1 'mode:'")
+            ?.trim()?.takeIf { it.isNotEmpty() }
+
+        val fds = processes.associate { it.pid to readCount("ls /proc/${it.pid}/fd 2>/dev/null | wc -l", errors) }
+
+        return Sample(now, processes, sockets, encoder, layers, audio, fds, errors)
+    }
+
+    private fun readProcesses(errors: MutableList<String>): List<ProcInfo> {
+        // 一次 shell 把所有候选进程的 stat 读出来，而不是每个进程起一次 su。
+        // su 的进程启动开销是几十毫秒，进程多了采样周期会被拉长，而不规律的
+        // 采样正好会毁掉「CPU 时间增量」这个指标。
+        //
+        // 脚本里一律避开 ${...} 花括号展开：这段字符串要经过 Kotlin 模板和
+        // shell 两层解析，花括号在两层里含义不同，最省事的写法是只用 basename。
+        val script = listOf(
+            "for d in /proc/[0-9]*; do",
+            "  [ -r \"\$d/cmdline\" ] || continue",
+            "  n=\$(cat \"\$d/comm\" 2>/dev/null)",
+            "  c=\$(tr '\\0' ' ' < \"\$d/cmdline\" 2>/dev/null)",
+            "  case \"\$n \$c\" in",
+            "    *baidu.carlife*|*hihonor.auto*|*carlink.cast*|*carlink.monitor*)",
+            "      echo \"PROC \$(basename \$d) \$(cat \"\$d/stat\" 2>/dev/null)\";;",
+            "  esac",
+            "done",
+        ).joinToString("\n")
+
+        val raw = runner.run(script)
+        if (raw == null) {
+            errors += ERR_PROC_UNREADABLE
+            return emptyList()
+        }
+        return raw.lineSequence()
+            .filter { it.startsWith("PROC ") }
+            .mapNotNull { line -> parseStat(line.removePrefix("PROC ")) }
+            .toList()
+    }
+
+    /**
+     * 解析 `/proc/<pid>/stat`。
+     *
+     * 第二字段 comm 用括号包着，里面可能有空格（`(some proc)`），所以不能
+     * 按空白切分——必须从最后一个 `)` 之后开始数。字段序号按 proc(5)：
+     * 之后第 1 个是 state，第 2 个是 ppid，第 12/13 是 utime/stime，
+     * 第 18 是 num_threads，第 22 是 rss（单位页）。
+     */
+    internal fun parseStat(entry: String): ProcInfo? {
+        val pid = entry.substringBefore(' ').toIntOrNull() ?: return null
+        val afterName = entry.substringAfter(") ", missingDelimiterValue = "")
+        if (afterName.isEmpty()) return null
+        val fields = afterName.split(' ').filter { it.isNotEmpty() }
+        if (fields.size < 22) return null
+        val state = fields[0].firstOrNull() ?: return null
+        return ProcInfo(
+            pid = pid,
+            ppid = fields[1].toIntOrNull() ?: 0,
+            name = entry.substringAfter('(').substringBefore(") ").trim(),
+            state = state,
+            cpuMillis = ((fields[11].toLongOrNull() ?: 0L) + (fields[12].toLongOrNull() ?: 0L)) * 10L,
+            threads = fields[17].toIntOrNull() ?: 0,
+            rssKb = (fields[21].toLongOrNull() ?: 0L) * 4L,
+        )
+    }
+
+    private fun readSockets(errors: MutableList<String>): List<SocketInfo> {
+        val out = mutableListOf<SocketInfo>()
+        for (file in listOf("/proc/net/tcp", "/proc/net/tcp6")) {
+            val raw = runner.run("cat $file 2>/dev/null") ?: continue
+            for (line in raw.lineSequence().drop(1)) {
+                val fields = line.trim().split(Regex("\\s+"))
+                if (fields.size < 5) continue
+                val port = fields[1].substringAfter(':', "").toIntOrNull(16) ?: continue
+                if (port !in CARLIFE_PORTS) continue
+                val queue = fields[4].split(':')
+                out += SocketInfo(
+                    port = port,
+                    state = stateName(fields[3]),
+                    txQueue = queue.getOrNull(0)?.toLongOrNull(16) ?: 0L,
+                    rxQueue = queue.getOrNull(1)?.toLongOrNull(16) ?: 0L,
+                )
+            }
+        }
+        return out
+    }
+
+    private fun readCount(command: String, errors: MutableList<String>): Int? =
+        runner.run(command)?.trim()?.toIntOrNull()
+
+    internal fun stateName(hex: String) = when (hex.uppercase()) {
+        "01" -> "ESTAB"; "02" -> "SYN_SENT"; "03" -> "SYN_RECV"
+        "04" -> "FIN_W1"; "05" -> "FIN_W2"; "06" -> "TIME_WT"
+        "07" -> "CLOSE"; "08" -> "CLOSE_WT"; "09" -> "LAST_ACK"
+        "0A" -> "LISTEN"; "0B" -> "CLOSING"
+        else -> hex
+    }
+
+    companion object {
+        const val ERR_NO_ROOT = "没有 root 权限，读不到 CarLife 的进程状态"
+        const val ERR_PROC_UNREADABLE = "读不到 /proc 进程列表"
+        val CARLIFE_PORTS = setOf(7240, 8240, 9240, 9241, 9242, 9340, 9440)
+    }
+}
+
+/**
+ * 跑一条只读 shell 命令，返回 stdout；失败或超时返回 null。
+ *
+ * 只有一个抽象方法，测试里可以直接用 lambda 伪造一个不存在的 root 环境。
+ * 「有没有 root」不单独建一个接口方法——它本身就是 `id -u` 的结果，多一个
+ * 方法就多一处可以和真实情况不一致的地方。
+ */
+fun interface Shell {
+    fun run(command: String): String?
+}
+
+/**
+ * `su -c` 包装。
+ *
+ * 每次都新起一个 su 进程：常驻 su shell 省开销，但它在多个采样线程之间共享
+ * stdin/stdout 时很容易串味，一次读到上一轮残留的输出就会得出完全错误的结论。
+ * 以监测工具来说，读错比读慢危险得多。
+ */
+class RootShell(private val timeoutMillis: Long = 8_000L) : Shell {
+    fun available(): Boolean = run("id -u")?.trim() == "0"
+
+    override fun run(command: String): String? = try {
+        val process = ProcessBuilder("su", "-c", command)
+            .redirectErrorStream(false)
+            .start()
+        val out = process.inputStream.bufferedReader().use { it.readText() }
+        if (!process.waitFor(timeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            null
+        } else out
+    } catch (_: Exception) {
+        null
+    }
+}
