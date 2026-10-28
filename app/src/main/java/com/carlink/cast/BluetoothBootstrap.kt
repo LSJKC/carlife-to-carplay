@@ -289,9 +289,47 @@ internal class BluetoothBootstrap(
 
     private fun startReceiver(current: Iap2Session, boot: PhoneBootstrap) {
         receiver = Thread({
+            /*
+             * Idle watchdog on the Bluetooth link.
+             *
+             * The 对照实现 sender treats 20 s without any inbound iAP2 frame
+             * as a dead control channel and rebuilds it:
+             *
+             *     "蓝牙已连接，但 N 秒未收到车机 iAP2 应答，正在重建控制通道"
+             *     (`C0237ic`: `this.b = 20000L`)
+             *
+             * This link had no such check: a car that stopped answering simply
+             * left the receiver thread blocked in recv() forever, and the
+             * session looked alive while nothing could be sent on it. The
+             * counters below make the same judgement with the same budget, and
+             * log the last frame seen so a field capture shows what the link
+             * was doing when it went quiet.
+             */
+            val idleLimitNanos = IDLE_REBUILD_AFTER_MS * 1_000_000L
+            var lastInboundNanos = System.nanoTime()
+            var inboundFrames = 0L
+            var rebuiltForIdle = 0
             try {
                 while (!closed.get() && !current.isClosed) {
-                    val frame = current.recv(1000) ?: continue
+                    val frame = current.recv(1000)
+                    if (frame == null) {
+                        val idleMs = (System.nanoTime() - lastInboundNanos) / 1_000_000L
+                        if (idleMs >= IDLE_REBUILD_AFTER_MS) {
+                            rebuiltForIdle++
+                            log(
+                                "蓝牙已连接，但 ${idleMs / 1000} 秒未收到车机 iAP2 应答，正在重建控制通道" +
+                                    "（累计收到 $inboundFrames 帧，第 $rebuiltForIdle 次重建）",
+                            )
+                            // Hand the session back the way a peer-initiated
+                            // restart does, so the caller rebuilds the link
+                            // instead of leaving a half-dead socket open.
+                            restart.complete(ByteArray(0))
+                            return@Thread
+                        }
+                        continue
+                    }
+                    lastInboundNanos = System.nanoTime()
+                    inboundFrames++
                     runCatching { boot.receive(frame) }
                         .onFailure { log("处理车机消息失败：${it.message}") }
                 }
@@ -304,6 +342,16 @@ internal class BluetoothBootstrap(
             }
         }, "carlink-bluetooth").apply { isDaemon = true; start() }
     }
+
+    /**
+     * Bluetooth link idle budget, matching the 对照实现 sender's 20 s.
+     *
+     * That sender rebuilds its control channel after this long without an
+     * inbound iAP2 frame (`C0237ic`: `this.b = 20000L`). Same number here so a
+     * field capture compares like with like.
+     */
+    private val IDLE_REBUILD_AFTER_MS = 20_000L
+
 
     private data class Link(
         val socket: BluetoothSocket,

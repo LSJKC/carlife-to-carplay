@@ -171,6 +171,8 @@ class AirPlaySender(
     /** Set once, so a lost audio grant is reported once instead of per packet. */
     private var audioSuppressed = false
     private var audioPacketsSent = 0L
+    private var pcmChunks = 0L
+    private var pcmCarryDropped = 0L
 
     /** Last sampleTime the receiver reported for our audio stream, and how often. */
     @Volatile private var receiverAudioSampleTime: Long = -1L
@@ -1732,7 +1734,25 @@ class AirPlaySender(
             synchronized(audioQueueLock) {
                 if (!isCurrentAudioChunkLocked(chunk)) return
                 pcmCarry = if (offset >= merged.size) ByteArray(0) else merged.copyOfRange(offset, merged.size)
-                if (pcmCarry.size > frameBytes * 4) pcmCarry = ByteArray(0)
+                if (pcmCarry.size > frameBytes * 4) {
+                    // The backlog grew past four packets: the source is running
+                    // ahead of the wire. Dropping it keeps latency bounded,
+                    // which is the same trade the 对照实现 sender makes with
+                    // its ring buffer's expiry counter.
+                    pcmCarryDropped += pcmCarry.size
+                    pcmCarry = ByteArray(0)
+                }
+                // Report the buffer state every 100 chunks. The 对照实现
+                // sender tracks underrun/expiry/overflow separately; this
+                // sender has one carry buffer, so the equivalent numbers are
+                // how much is still pending, how much was dropped, and how many
+                // samples have gone out.
+                if (++pcmChunks % 100L == 0L) {
+                    events.diagnostic(
+                        "音频缓冲：待发=${pcmCarry.size}B 已丢弃=${pcmCarryDropped}B " +
+                            "已发采样=$pcmSamples 每包=${format.samplesPerPacket} 帧",
+                    )
+                }
             }
             return
         }
@@ -2138,8 +2158,21 @@ class AirPlaySender(
         val owns = "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
             "音频=${if (modes.ownsAudio()) "手机" else "车机"}"
         val hid = "HID触控设备=${touchDevices.size} 按键设备=${keyDevices.size}"
+        /*
+         * The audio half of the snapshot carries the same numbers a field
+         * capture needs to compare against the reference sender: which format
+         * won, how many frames per packet, and how much of the carry buffer was
+         * dropped. Without them "audio stopped" cannot be told apart from "audio
+         * was never started".
+         */
+        val audioDetail = selectedAudio?.let {
+            "音频格式=${it.streamType}/${it.codec} ${it.sampleRate}Hz/" +
+                "${it.channels}声道 每包${it.samplesPerPacket}帧 " +
+                "延迟=${if (it.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS}ms"
+        } ?: "音频格式=未协商"
         return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback " +
-            "$owns $tunnel $hid"
+            "$owns $tunnel $hid $audioDetail " +
+            "待发缓冲=${pcmCarry.size}B 丢弃=${pcmCarryDropped}B"
     }
 
     override fun close() {
