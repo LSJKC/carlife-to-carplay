@@ -192,7 +192,14 @@ internal class AirPlayLink(
                 )
             },
             audioProfileOrder = { candidates ->
-                audioProfiles.order(candidates)
+                val ordered = audioProfiles.order(candidates)
+                log(
+                    "音频档位排序：本机首选=${candidates.firstOrNull()?.key ?: "无"}" +
+                        "，记忆可用=${audioProfiles.lastWorking() ?: "无"}" +
+                        "，已拒=${audioProfiles.rejected().ifEmpty { listOf("无") }.joinToString(",")}" +
+                        " → 实际顺序=${ordered.joinToString("/") { it.key }}",
+                )
+                ordered
             },
             audioProfileWorking = { profile ->
                 audioProfiles.recordWorking(profile)
@@ -465,7 +472,7 @@ internal class AirPlayLink(
                     control.begin()
                     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
                     var identifyRetries = 0
-                    var nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_500)
+                    var nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMMAND_IAP_RETRY_MILLIS)
                     /*
                      * Counts what the car actually answers on this transport.
                      *
@@ -486,7 +493,7 @@ internal class AirPlayLink(
                             check(System.nanoTime() < deadline) { "Wi-Fi iAP2 认证超时" }
                         }
                         if (!control.status().identified &&
-                            identifyRetries < 3 &&
+                            identifyRetries < COMMAND_IAP_MAX_ATTEMPTS &&
                             System.nanoTime() >= nextIdentifyRetry
                         ) {
                             /*
@@ -497,26 +504,63 @@ internal class AirPlayLink(
                              * later ones re-send 0x1d00; [PhoneBootstrap.begin]
                              * decides which, and refuses to restart an exchange
                              * the car is already midway through.
+                             *
+                             * The cap used to be 3, sized against the 3 s
+                             * interval that has since been cut to 800 ms. With
+                             * that interval three attempts are spent inside
+                             * 2.4 s, which is shorter than the car's own 2.8 s
+                             * post-restart window — the cap would have exhausted
+                             * itself before the first restart even arrived
+                             * (which is why the old captures show a fresh
+                             * 0x1D00 landing every 3 s and nothing after the
+                             * fourth). Raise it so attempts keep pace with the
+                             * window instead of being rationed against it.
                              */
                             identifyRetries++
                             identifyRequested++
                             /*
-                             * Alternate the opening message.
+                             * Rotate through the opening messages.
                              *
-                             * Attempt 1 sends 0xAA06 ("give me your
-                             * certificate"), which is what the 对照实现
-                             * sender opens with; attempts 2 and 3 fall back to
-                             * the existing 0x1D00 ordering. Keeping both on the
-                             * wire is what tells them apart in one session: if
-                             * the car ever answers, the log says which message
-                             * it answered.
+                             * Three senders disagree about what the car answers
+                             * on this transport, and no capture has yet shown
+                             * it answer any of them:
+                             *
+                             *   0xAA00  what the reference sender opens with
+                             *           on this car after a link restart, as
+                             *           part of 0xAA00 -> 0xAA01 -> 0xAA03 ->
+                             *           0xAA05 -> 0x1D00 -> 0x1D01
+                             *   0xAA06  what 对照实现 opens with
+                             *           ("网络 AA06 没有证书缓存，无法认证")
+                             *   0x1D00  what the Bluetooth link needs, and
+                             *           what every build so far sent here
+                             *
+                             * Rotating costs nothing and makes one session
+                             * self-describing: whichever message the car
+                             * finally answers is the one printed next to the
+                             * answer. The 800 ms interval means all three are
+                             * on the wire inside one post-restart window.
                              */
-                            if (identifyRetries == 1 && !control.status().identified) {
-                                control.requestCertificate()
-                            } else {
-                                control.begin()
+                            when (identifyRetries % 3) {
+                                1 -> control.requestCertificate()   // 0xAA06
+                                2 -> control.beginWithAuthentication() // 0xAA00
+                                else -> control.begin()             // 0x1D00
                             }
-                            nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(3_000)
+                            nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                                /*
+                                 * Shorter than the car's own restart window.
+                                 *
+                                 * After the car reopens the link it waits about
+                                 * 2.8 s before destroying the session (measured
+                                 * at 2764/2871/2898 ms across three captures).
+                                 * A 3 s retry interval is longer than that, so a
+                                 * bootstrap driven by this timer — rather than
+                                 * by the restart itself — always lands after the
+                                 * car has already given up. 800 ms leaves room
+                                 * for the link layer to settle and still fits
+                                 * three attempts inside the window.
+                                 */
+                                COMMAND_IAP_RETRY_MILLIS,
+                            )
                             val stage = control.status()
                             log(
                                 "Wi-Fi iAP2 引导重试 #$identifyRetries：" +
@@ -557,41 +601,52 @@ internal class AirPlayLink(
                          */
                         if (linkRestarted.compareAndSet(true, false)) {
                             /*
-                             * "Already identified" cannot mean `identified`.
+                             * Replay the bootstrap the moment the new link is up.
                              *
-                             * This car never answers 0x1D00 on the Wi-Fi
-                             * command channel — measured across every capture,
-                             * `identified` stays false for the whole session
-                             * (`已收CSM=0`). Gating the quiet path on it made
-                             * the quiet path unreachable, which the 1.3.1 field
-                             * log shows directly: LINK-RESTART at 17690,
-                             * "本链路未完成识别，重放引导" at 17776, teardown at
-                             * 20555.
+                             * 1.3.2 tried the opposite here, on the reading of
+                             * the reference sender's "不重发 RECORD、不改变屏幕
+                             * 归属" (`V0`) rule that a session already streaming
+                             * should stay silent across a link restart. The
+                             * 1.3.2 field capture shows that reading is wrong.
                              *
-                             * What does hold is that the session itself is
-                             * already streaming: the screen is owned, RECORD
-                             * completed, and video frames are going out. That
-                             * is the state the reference sender stays quiet in.
+                             * Measured over four sessions on this car, the car
+                             * reopens the link about 10.2 s after RECORD and
+                             * destroys the session 2.8 s later:
+                             *
+                             *     19988 marker -> 20002 new SYN -> 22752 reset
+                             *     17684 marker -> 17690 new SYN -> 20555 reset
+                             *     15728 marker -> 15735 new SYN -> 18626 reset
+                             *     16933 marker -> 16940 new SYN -> 18372 reset
+                             *
+                             * The link layer already answers the new SYN/ACK;
+                             * what stayed silent in 1.3.2 was everything above
+                             * it, because the quiet branch set the retry timer
+                             * to `Long.MAX_VALUE` and the bootstrap never ran.
+                             * The car then gave up. The reference sender's own
+                             * trace does the reverse — a complete second round
+                             * (0xAA00 -> 0xAA01 -> 0xAA03 -> 0xAA05 -> 0x1D00
+                             * -> 0x1D01) starts one millisecond after its
+                             * link-restart — and it is the sender that holds
+                             * this same car open for 110 s.
+                             *
+                             * So the restart always replays, immediately, and
+                             * the 2.5 s/3 s retry timers are bypassed: the car's
+                             * window after a restart (2.8 s) is shorter than the
+                             * retry interval (3.0 s), so a timer-driven bootstrap
+                             * could not have answered it in time even when the
+                             * quiet branch was not taken. That is why the earlier
+                             * captures showed a fresh 0x1D00 landing *after* the
+                             * window had already closed.
                              */
-                            val streaming = sender?.isStreaming() == true
-                            val wasIdentified = control.status().identified || streaming
                             control.restartForNewLink()
                             identifyRetries = 0
-                            if (wasIdentified) {
-                                // Mark as already handled: the bootstrap below
-                                // is skipped, so nothing new goes on the wire.
-                                log(
-                                    "车机重启了 iAP2 链路：本链路已在推流" +
-                                        "（identified=${control.status().identified}，" +
-                                        "推流中=$streaming），" +
-                                        "按参考实现静默重连（不重发 0x1D00、不改屏幕归属）",
-                                )
-                                nextIdentifyRetry = Long.MAX_VALUE
-                            } else {
-                                log("车机重启了 iAP2 链路：本链路未完成识别，重放引导")
-                                nextIdentifyRetry = System.nanoTime()
-                                control.begin()
-                            }
+                            log(
+                                "车机重开了 iAP2 链路：立即在新链路上重放引导" +
+                                    "（推流中=${sender?.isStreaming() == true}，" +
+                                    "车机给的窗口约 2.8 秒，不等重试定时器）",
+                            )
+                            nextIdentifyRetry = System.nanoTime()
+                            control.begin()
                         }
                         val frame = runtime.recv(1000) ?: continue
                         csmReceived++
@@ -670,5 +725,32 @@ internal class AirPlayLink(
         }
         nowPlaying.close()
         worker?.interrupt()
+    }
+
+    private companion object {
+        /**
+         * Interval between bootstrap attempts on the Wi-Fi command channel.
+         *
+         * Has to fit inside the car's own post-restart window. The head unit
+         * reopens the iAP2 link about 10.2 s after RECORD and destroys the
+         * session 2.76-2.90 s later (three captures: 2764/2871/2898 ms). The
+         * previous 3 s interval was longer than that window, so any bootstrap
+         * driven by the timer instead of by the restart event could only ever
+         * arrive after the car had already decided to disconnect.
+         *
+         * 800 ms allows the link layer to finish its SYN/ACK exchange and still
+         * fits three attempts before the car's deadline.
+         */
+        const val COMMAND_IAP_RETRY_MILLIS = 800L
+
+        /**
+         * How many bootstrap attempts a session may spend.
+         *
+         * Sized so the attempts outlast the session instead of running out
+         * first: at 800 ms apart, 40 attempts cover 32 s, comfortably past the
+         * car's 13.1 s teardown. The old value of 3 was sized against a 3 s
+         * interval and could not reach the first link restart.
+         */
+        const val COMMAND_IAP_MAX_ATTEMPTS = 40
     }
 }

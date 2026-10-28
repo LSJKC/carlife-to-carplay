@@ -78,6 +78,29 @@ class AirPlaySender(
     private var videoFramesSinceKeepAlive = 0
     private var videoBytesSinceKeepAlive = 0L
     private var videoKeepAliveCount = 0L
+    /** When RECORD first completed, for the disconnect heartbeat below. */
+    @Volatile private var recordCompletedNanos = 0L
+    /*
+     * Disconnect heartbeat.
+     *
+     * This head unit destroys the session 13.1 s after RECORD on every build
+     * measured so far — 13055 / 13102 / 13131 / 13127 ms across 1.2.97, two
+     * 1.3.1 captures with and without audio, and 1.3.2. The spread is 76 ms
+     * over four sessions and two months of traffic shapes, which means a
+     * timer inside the car, not a reaction to anything we stream.
+     *
+     * The one thing that clearly differs from a sender that stays up is who
+     * speaks on the event and command channels. A heartbeat that records, once
+     * a second, how long it has been since *the car* last said anything makes
+     * the failure legible: if inbound traffic stops at second 3 and the reset
+     * lands at second 13, the car had already given up long before it acted,
+     * and the silence — not the reset — is the thing to explain.
+     */
+    @Volatile private var lastInboundEventNanos = 0L
+    @Volatile private var lastInboundIapNanos = 0L
+    @Volatile private var inboundEventCount = 0L
+    @Volatile private var inboundIapCount = 0L
+    private var heartbeatCount = 0L
     /** Keep-alives start after the initial CONFIG/frame pair is on the wire. */
     @Volatile private var videoStreamReady = false
     @Volatile private var avcC: ByteArray? = null
@@ -630,6 +653,7 @@ class AirPlaySender(
         run("carplay-events") {
             while (!closed.get()) {
                 val command = eventWire.next()
+                lastInboundEventNanos = System.nanoTime(); inboundEventCount++
                 if (command.status == null) { val reply = handleCommand(command.body); eventWire.respond(command,reply.body,reply.status) }
                 else if (command.status in 200..299) receiveIapResponse(command,typedOnly = true)
             }
@@ -836,6 +860,8 @@ class AirPlaySender(
         // can reset the whole session before the first video packet arrives.
         wire.request("RECORD", "/")
         events.diagnostic("屏幕 RECORD 已完成，等待 startDisplay 启动来源编码器")
+        recordCompletedNanos = System.nanoTime()
+        startDisconnectHeartbeat()
         val keepAliveWithStats = (info["keepAliveSendStatsAsBody"] == true) ||
             ((info["keepAliveSendStatsAsBody"] as? Number)?.toInt() == 1)
         startVideoKeepAlive(keepAliveWithStats)
@@ -873,14 +899,37 @@ class AirPlaySender(
              * descriptor.  The Buick traces show that a bad audio profile can
              * still tear down the whole session several seconds later, so do
              * not mark it working until the session has survived the same
-             * observation window used by the app's connection proof.
+             * observation window used by the app's connection proof — *and*
+             * the car has actually consumed audio in that window.
+             *
+             * Surviving alone is not enough: this head unit tears the session
+             * down 13.1 s after RECORD no matter what is negotiated, so a
+             * profile can outlive a short window without a single packet
+             * having been rendered. `audioPacketsSent` is incremented by the
+             * audio worker on every RTP write, so requiring it to have grown
+             * separates "the car accepted the parameters" from "the car
+             * played something", which is the only distinction that makes a
+             * remembered profile worth promoting.
              */
             val stableProfile = checkNotNull(selectedAudio)
+            val packetsAtSetup = audioPacketsSent
             run("carplay-audio-profile-stable") {
                 Thread.sleep(AUDIO_PROFILE_STABLE_WINDOW_MS)
                 if (!closed.get()) {
                     audioProfileStable = true
-                    audioProfileWorking?.invoke(stableProfile)
+                    val flowed = audioPacketsSent - packetsAtSetup
+                    if (flowed > 0L) {
+                        audioProfileWorking?.invoke(stableProfile)
+                        events.diagnostic(
+                            "音频档位已确认可用：${stableProfile.key}" +
+                                "（${AUDIO_PROFILE_STABLE_WINDOW_MS / 1000} 秒内发出 $flowed 个包）",
+                        )
+                    } else {
+                        events.diagnostic(
+                            "音频档位未记为可用：${stableProfile.key} 在" +
+                                "${AUDIO_PROFILE_STABLE_WINDOW_MS / 1000} 秒内没有发出任何音频包",
+                        )
+                    }
                 }
             }
             // The stream is added after RECORD; a second RECORD is required to
@@ -1047,6 +1096,53 @@ class AirPlaySender(
                 // Session close interrupts workers after closing owned sockets.
             } catch (error: Exception) {
                 if (!closed.get()) events.diagnostic("AirPlay UDP keepAlive 结束：${error.message}")
+            }
+        }
+    }
+
+    /**
+     * Records, once a second, whether the car is still talking to us.
+     *
+     * The session is destroyed 13.1 s after RECORD on every build measured. What
+     * no capture has shown yet is *when the car stopped caring*, because the
+     * journal only prints the last four seconds as a stack trace. This thread
+     * makes the shape visible:
+     *
+     *     RECORD 心跳 #3 +3.0s：车机静默 3.0s，事件通道累计=0 命令通道累计=0
+     *
+     * If those counters stay at zero for the whole session, then this car never
+     * speaks on either Wi-Fi channel once RECORD is in — the marker it sends
+     * every second is *our* expectation, not an observation — and the 13.1 s
+     * timer is tearing down a session the car decided was one-way. If they grow
+     * and then stop, the last value before the silence is the thing to explain.
+     */
+    private fun startDisconnectHeartbeat() {
+        val recordedAt = recordCompletedNanos
+        run("carplay-heartbeat") {
+            try {
+                while (!closed.get()) {
+                    Thread.sleep(1000)
+                    if (closed.get()) break
+                    heartbeatCount++
+                    val now = System.nanoTime()
+                    val sinceRecord = (now - recordedAt) / 1_000_000_000.0
+                    fun silence(at: Long) = if (at == 0L) "从未" else
+                        "%.1fs".format((now - at) / 1_000_000_000.0)
+                    events.diagnostic(
+                        "RECORD 心跳 #$heartbeatCount +%.1fs：车机静默 事件=%s(共%d) 命令=%s(共%d)；" +
+                            "本端视频帧=%d 音频包=%d /feedback=%d 屏幕=%s 音频=%s"
+                                .format(
+                                    sinceRecord,
+                                    silence(lastInboundEventNanos), inboundEventCount,
+                                    silence(lastInboundIapNanos), inboundIapCount,
+                                    videoKeepAliveCount, audioPacketsSent, feedbackCount,
+                                    if (modes.ownsScreen()) "手机" else "车机",
+                                    if (modes.ownsAudio()) "手机" else "车机",
+                                ),
+                    )
+                }
+            } catch (_: InterruptedException) {
+                // Session close interrupts this worker.
             }
         }
     }
@@ -1986,6 +2082,7 @@ class AirPlaySender(
                  */
                 val forwarded = receiveIap(data) ||
                     (ensureCommandIap()?.offer(data) == true)
+                lastInboundIapNanos = System.nanoTime(); inboundIapCount++
                 val description = describeIapMessage(data)
                 if (!forwarded && reportedCommands.add("iAP:$description")) {
                     events.diagnostic(

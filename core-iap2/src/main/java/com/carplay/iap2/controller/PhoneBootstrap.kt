@@ -140,6 +140,25 @@ class PhoneBootstrap(
     fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
 
     /**
+     * Opens the way the reference sender opens after a link restart.
+     *
+     * Its post-restart trace on this car is a complete second round:
+     *
+     *     0xAA00 -> 0xAA01 -> 0xAA03 -> 0xAA05 -> 0x1D00 -> 0x1D01
+     *
+     * — authentication first, identification only once the car has accepted
+     * the challenge. The identification-first order in [begin] is what the
+     * Bluetooth link needs, and it has never produced an answer on this Wi-Fi
+     * transport. This entry point exists so both orders can be on the wire
+     * inside one post-restart window; the retry loop rotates through them.
+     */
+    fun beginWithAuthentication() {
+        onStage("向车机发起认证 (0xAA00)")
+        send(empty(0xaa00))
+        reportStatus()
+    }
+
+    /**
      * Asks the accessory for its certificate the way the 对照实现 sender does.
      *
      * Its command-channel trace names a different opening message than the one

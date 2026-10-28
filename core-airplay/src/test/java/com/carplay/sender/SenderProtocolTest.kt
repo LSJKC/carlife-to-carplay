@@ -98,49 +98,49 @@ class SenderProtocolTest {
     }
     @Test fun queueRequiresRecoveryKeyframeAfterOverflow() {
         val queue = VideoQueue(2,20)
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(1),0,false)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(2),1,true)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(3),2,false)))
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(4),3,false)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(5),4,true)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1),0,false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(2),1,true)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(3),2,false)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(4),3,false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(5),4,true)))
         assertEquals(4,queue.dropped); assertEquals(4,queue.take()!!.ptsUs)
-        queue.close(); assertNull(queue.take()); assertFalse(queue.offer(EncodedVideo(byteArrayOf(1),5,true)))
+        queue.close(); assertNull(queue.take()); assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1),5,true)))
     }
     @Test fun queueResetDropsOldEpochAndWaitsForNewKeyframe() {
         val queue = VideoQueue(4, 20)
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
 
         queue.resetForKeyFrame()
 
         assertEquals(2, queue.dropped)
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(3), 12, false)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(4), 13, true)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(3), 12, false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(4), 13, true)))
         assertEquals(13, queue.take()!!.ptsUs)
         queue.close()
     }
     @Test fun queueDoesNotReleaseRecoveryForAFrameThatWouldOverflowIt() {
         val queue = VideoQueue(2, 20)
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
 
         queue.resetForKeyFrame()
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(3), 12, false)))
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(4), 13, false)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(5), 14, true)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(3), 12, false)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(4), 13, false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(5), 14, true)))
         assertEquals(14, queue.take()!!.ptsUs)
         queue.close()
     }
     @Test fun queueRejectsAFrameDequeuedBeforeDecoderEpochReset() {
         val queue = VideoQueue(4, 20)
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
         val borrowed = checkNotNull(queue.take())
 
         queue.resetForKeyFrame()
 
         assertFalse(queue.isCurrent(borrowed))
-        assertFalse(queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(3), 12, true)))
+        assertNotEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(2), 11, false)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(3), 12, true)))
         val fresh = checkNotNull(queue.take())
         assertTrue(queue.isCurrent(fresh))
         assertEquals(12, fresh.ptsUs)
@@ -148,7 +148,7 @@ class SenderProtocolTest {
     }
     @Test fun queueResetWaitsForAnInFlightCurrentWrite() {
         val queue = VideoQueue(4, 20)
-        assertTrue(queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
+        assertEquals(VideoQueue.OfferResult.ACCEPTED,queue.offer(EncodedVideo(byteArrayOf(1), 10, true)))
         val borrowed = checkNotNull(queue.take())
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
