@@ -101,6 +101,8 @@ internal class CarLifePanelCompositor(
     private var lastStatsAt = 0L
     private var renderedFrames = 0L
     private var encodedFrames = 0L
+    private var keyFrames = 0L
+    private var lastKeyFrameNanos: Long? = null
     private var firstOutputFormatLogged = false
     private var outputConfigWarningLogged = false
     private var encoderStallWarningLogged = false
@@ -417,13 +419,34 @@ internal class CarLifePanelCompositor(
         }
     }
 
+    /** Seconds between the encoder's own IDRs; real key frames are requested on demand. */
+    private val keyFrameIntervalSeconds = 5
+
     private fun initializeEncoder() {
         fun buildFormat(bitrateMode: Int?): MediaFormat =
             MediaFormat.createVideoFormat(MIME_AVC, outputWidth, outputHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, ENCODER_BIT_RATE)
                 setInteger(MediaFormat.KEY_FRAME_RATE, outputFps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                /*
+                 * A five-second GOP, not one.
+                 *
+                 * `KEY_I_FRAME_INTERVAL = 1` made this encoder emit a sync
+                 * frame every single second regardless of content. On a
+                 * 1972x520 canvas those measure 250-320 KB each — measured at
+                 * a 998-1006 ms cadence across the 1.2.93 field logs — which
+                 * is roughly 2.5 Mbps of key frames on top of the P frames,
+                 * a third of the encoder's whole 8 Mbps budget spent on
+                 * redundancy.
+                 *
+                 * The car does not need them that often: a decoder only needs
+                 * a sync frame when it starts, when it rebinds, or when the
+                 * screen is handed back. Every one of those cases goes through
+                 * [requestEncoderSyncFrame], which asks the encoder directly.
+                 * The periodic interval is only a safety net for a decoder that
+                 * missed a request, so it can afford to be long.
+                 */
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyFrameIntervalSeconds)
                 bitrateMode?.let { setInteger(MediaFormat.KEY_BITRATE_MODE, it) }
             }
         /*
@@ -815,6 +838,26 @@ internal class CarLifePanelCompositor(
                     if (outputAvcC != null) {
                         val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                         outputFrame?.invoke(VideoPackets.lengthPrefixed(bytes), info.presentationTimeUs, keyFrame)
+                        if (keyFrame) {
+                            /*
+                             * Key-frame cadence and size, every time.
+                             *
+                             * Where the IDR budget goes is not visible from the
+                             * AirPlay side alone — the car only sees the result.
+                             * Printing the interval between sync frames and
+                             * their size here is what tells a three-second GOP
+                             * from an on-demand one, and catches the encoder
+                             * falling back to a short interval on its own.
+                             */
+                            val now = System.nanoTime()
+                            val since = lastKeyFrameNanos?.let { (now - it) / 1_000_000 } ?: -1
+                            lastKeyFrameNanos = now
+                            keyFrames++
+                            log(
+                                "全画布 IDR：第 $keyFrames 个，${bytes.size}B，" +
+                                    "距上一个=$since ms，间隔设定=${keyFrameIntervalSeconds}s",
+                            )
+                        }
                         encodedFrames++
                         if (encodedFrames == 1L) {
                             val format = runCatching { codec.outputFormat.toString() }.getOrDefault("未知")

@@ -153,7 +153,12 @@ internal class MirrorSource(private val context: Context) : PhoneProjectionAdapt
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, (width.toLong() * height * fps / 8).coerceIn(2_000_000, 24_000_000).toInt())
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            // Five-second GOP, the same value CarWith uses (NativeVideoSelection.java).
+            // A
+            // sync frame every second on a large raster is a third of the
+            // bitrate spent on redundancy. The car asks for one explicitly
+            // whenever its decoder actually needs it.
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
             if (Build.VERSION.SDK_INT >= 29) setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
         }
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
