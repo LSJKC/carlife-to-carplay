@@ -556,15 +556,35 @@ internal class AirPlayLink(
                          * the bootstrap replayed.
                          */
                         if (linkRestarted.compareAndSet(true, false)) {
-                            val wasIdentified = control.status().identified
+                            /*
+                             * "Already identified" cannot mean `identified`.
+                             *
+                             * This car never answers 0x1D00 on the Wi-Fi
+                             * command channel — measured across every capture,
+                             * `identified` stays false for the whole session
+                             * (`已收CSM=0`). Gating the quiet path on it made
+                             * the quiet path unreachable, which the 1.3.1 field
+                             * log shows directly: LINK-RESTART at 17690,
+                             * "本链路未完成识别，重放引导" at 17776, teardown at
+                             * 20555.
+                             *
+                             * What does hold is that the session itself is
+                             * already streaming: the screen is owned, RECORD
+                             * completed, and video frames are going out. That
+                             * is the state the reference sender stays quiet in.
+                             */
+                            val streaming = sender?.isStreaming() == true
+                            val wasIdentified = control.status().identified || streaming
                             control.restartForNewLink()
                             identifyRetries = 0
                             if (wasIdentified) {
                                 // Mark as already handled: the bootstrap below
                                 // is skipped, so nothing new goes on the wire.
                                 log(
-                                    "车机重启了 iAP2 链路：本链路已完成识别，按参考实现静默重连" +
-                                        "（不重发 0x1D00、不改屏幕归属）",
+                                    "车机重启了 iAP2 链路：本链路已在推流" +
+                                        "（identified=${control.status().identified}，" +
+                                        "推流中=$streaming），" +
+                                        "按参考实现静默重连（不重发 0x1D00、不改屏幕归属）",
                                 )
                                 nextIdentifyRetry = Long.MAX_VALUE
                             } else {

@@ -418,30 +418,6 @@ class AirPlaySender(
         fun key(salt: String, label: String) = AirPlayCrypto.hkdfSha512(shared, salt.toByteArray(), label.toByteArray())
         wire.cipher = ControlCipher(key("Control-Salt", "Control-Read-Encryption-Key"), key("Control-Salt", "Control-Write-Encryption-Key"))
         val timingPort = clock.listen(); resources += clock
-        /*
-         * Announce which screen this sender intends to drive, before asking
-         * for it.
-         *
-         * The 对照实现 sender does the same and names the step in its own
-         * log — "确认车机初始屏幕归属，再申请连接显示" — and it keeps a
-         * distinct `status-acked` phase so it never re-announces ownership once
-         * the car has answered. Asking for the screen without saying who owns
-         * it first is what made this car treat the SETUP as a hostile grab.
-         *
-         * The body is the same shape used for later changeModes notifications,
-         * so the car sees one consistent ownership statement.
-         */
-        runCatching {
-            wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
-        }.onSuccess {
-            events.diagnostic(
-                "已确认车机初始屏幕归属，再申请连接显示：" +
-                    "屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
-                    "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
-            )
-        }.onFailure {
-            events.diagnostic("初始屏幕归属声明失败（继续 SETUP）：${it.message}")
-        }
         val setup = plist(wire.request("SETUP", "/", encode(mapOf(
             "deviceID" to identity.id,
             "name" to "CarPlay Android",
@@ -767,7 +743,23 @@ class AirPlaySender(
         }
 
         if (enableAudio) {
-            val preferAacMedia = hasHighQualityMediaCapability(info)
+            /*
+             * PCM first, matching the 对照实现 sender.
+             *
+             * `hasHighQualityMediaCapability` used to force AAC ahead of PCM
+             * whenever the car declared a type-102 media entry — and this car
+             * always does, so the PCM branch was unreachable in practice. The
+             * reference sender that stays connected drives type=100 instead, so
+             * the capability gate no longer overrides the order. The value is
+             * still computed and logged, because a head unit that refuses PCM
+             * is the case the AAC fallback exists for.
+             */
+            val aacCapable = hasHighQualityMediaCapability(info)
+            val preferAacMedia = false
+            events.diagnostic(
+                "音频格式优先级：PCM(100) 优先，AAC(102) 作为回退" +
+                    "（车机声明 media AAC=$aacCapable）",
+            )
             val candidates = SenderNegotiation.audioCandidates(info, preferAacMedia = preferAacMedia)
             val ordered = audioProfileOrder?.invoke(candidates).orEmpty().ifEmpty { candidates }
             selectedAudio = ordered.firstOrNull()
@@ -2027,6 +2019,22 @@ class AirPlaySender(
                             if (ownedAfter) "车机把音频资源交还手机，恢复发送"
                             else "车机收回了音频资源，暂停发送音频",
                         )
+                        /*
+                         * Print what the car actually asked for, not only the
+                         * outcome.
+                         *
+                         * A takeover here is the car withdrawing a resource it
+                         * granted; the command body says which resources it
+                         * wants and whether it named a reason. Without this the
+                         * journal shows the withdrawal but never the request,
+                         * which is exactly the gap that made "car hands back
+                         * the screen one second after restart" unexplainable.
+                         */
+                        events.diagnostic(
+                            "资源归属变更请求：${command["params"]} " +
+                                "→ 屏幕=${if (modes.ownsScreen()) "手机" else "车机"} " +
+                                "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
+                        )
                     }
                     result
                 }
@@ -2174,6 +2182,16 @@ class AirPlaySender(
      * survived four hypotheses; this turns the next capture into evidence
      * instead of guesswork.
      */
+    /**
+     * True once this session has sent at least one video frame.
+     *
+     * The command channel above uses this as its "the session is live" signal:
+     * `identified` never becomes true on this firmware, so it cannot answer
+     * whether a restarted link belongs to an established stream or to one that
+     * never came up.
+     */
+    fun isStreaming(): Boolean = videoKeepAliveCount > 0L && modes.ownsScreen()
+
     fun sessionSnapshot(): String {
         val frames = videoKeepAliveCount
         val audio = audioPacketsSent
