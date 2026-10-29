@@ -49,7 +49,26 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
             startup = if (responder) Iap2LinkStartup.ACCESSORY_FIRST else Iap2LinkStartup.DETECTION_THEN_SYN,
             synchronizationOverride = synchronization,
             negotiateControlSession = true,
-            ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL,
+            /*
+             * Echo a repeated detection marker instead of dying on it.
+             *
+             * Both profiles here are used against firmware that keeps sending
+             * the six-byte marker while the link is up:
+             *
+             *   COMMAND_TUNNEL     the Wi-Fi command channel (fixed in 1.2.80)
+             *   ACCESSORY_FIRST    the Buick E2LB Bluetooth link (fixed here)
+             *
+             * On the Buick the old terminal behavior cost the media message:
+             * the 1.3.7 capture shows `NowPlaying 发送失败：车机在控制阶段重新
+             * 发送 iAP2 检测包，旧链路已结束` every two seconds, which is why
+             * the head unit never leaves "正在加载媒体".
+             *
+             * VIVO_ACCESSORY_FIRST keeps the old behavior deliberately —
+             * PhoneBluetoothHandshakeTest asserts that a repeated marker ends
+             * the link on that firmware, and no capture has shown it sending
+             * one mid-session.
+             */
+            ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL || this == ACCESSORY_FIRST,
             maximumInFlightPackets = 1,
         )
     }

@@ -325,26 +325,38 @@ class Iap2LinkEngine(
                 receive[0] == IAP2_MARKER[0] && receive[1] == IAP2_MARKER[1]) {
                 if (receive.size < IAP2_MARKER.size) return discarded
                 if (receive.matches(IAP2_MARKER)) {
+                    /*
+                     * A repeated detection marker is a heartbeat on this car.
+                     *
+                     * Whether to treat it as one is a per-firmware decision, so
+                     * it stays behind a config flag — but the flag now means
+                     * "echo the marker and keep the link" on both transports
+                     * that need it, not just the Wi-Fi command tunnel.
+                     *
+                     * The 1.3.7 field capture shows what the old behavior cost
+                     * on the Buick. The car repeats the marker while the link
+                     * is up; the Bluetooth link used to call
+                     * `die("车机在控制阶段重新发送 iAP2 检测包，旧链路已结束")`
+                     * and drop everything queued behind it:
+                     *
+                     *     3468 NowPlaying 发送失败：车机在控制阶段重新发送
+                     *          iAP2 检测包，旧链路已结束
+                     *     5470 (again)
+                     *     7472 (again)
+                     *
+                     * 0x5001 is the media metadata message. Losing it every
+                     * two seconds is exactly why the head unit sits on
+                     * "正在加载媒体" with no title, artist or artwork, and why
+                     * its audio route never settles. The 13.1 s teardown that
+                     * follows is the same watchdog the Wi-Fi path was already
+                     * fixed for in 1.2.80.
+                     *
+                     * Vivo keeps the terminal behavior: `vivoReady()` fixtures
+                     * in PhoneBluetoothHandshakeTest assert that a repeated
+                     * marker ends the link there, and that firmware has not
+                     * been observed sending one mid-session.
+                     */
                     if (config.ignoreRepeatedDetectionMarker) {
-                        /*
-                         * Echo it back. This is what keeps the session alive.
-                         *
-                         * E2LB sends this marker once a second while the
-                         * Wi-Fi command link is up, and it is not a probe to
-                         * be ignored — the reference sender answers every one
-                         * of them with the identical six bytes
-                         * (`phase=detection-response` in its trace). Dropping
-                         * them instead is what produced the 12.9 s teardown:
-                         * measured from RECORD over three field sessions the
-                         * car resets the control connection at 13084, 13116
-                         * and 13164 ms, and its own marker cadence in the
-                         * failing captures is exactly 1001 ms from 19.07 s to
-                         * 21.07 s, unanswered every time.
-                         *
-                         * It is still not a request to tear down the
-                         * negotiated session, so the link stays up and only
-                         * the marker is consumed.
-                         */
                         receive.discard(IAP2_MARKER.size)
                         if (!appendOutput(IAP2_MARKER)) return false
                         markerEchoes += 1
