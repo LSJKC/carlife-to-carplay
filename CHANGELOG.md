@@ -66,7 +66,7 @@ iAP2 逻辑改动只有一处。底层日志把两种行为摆在一起：
 
 ## 1.3.13 — 配对头与音频回执
 
-- `X-Apple-PD: 1`，仅 `pair-verify` 携带（对照 a-sender 的配对实现）
+- `X-Apple-PD: 1`，仅 `pair-verify` 携带（对照真机抓包的配对序列）
 - `/feedback` 按 `type` 和 `streamConnectionID` 过滤，并解析 `timestampRawNs`
 
 车机会一次报多条音频流，取第一条会把辅助流的播放位置当成媒体流的——而
