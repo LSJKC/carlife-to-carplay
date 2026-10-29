@@ -116,7 +116,23 @@ internal class BluetoothBootstrap(
     fun connect(timeoutMillis: Long = 45_000): Result {
         requirePermissions()
         check(bluetooth.isEnabled) { "请打开蓝牙" }
-        check(peer.bondState == BluetoothDevice.BOND_BONDED) { "请先在系统蓝牙设置中与车机完成配对" }
+        /*
+         * Print the pairing state before refusing.
+         *
+         * After unpairing on both sides this is the first thing that fails, and
+         * "请先在系统蓝牙设置中与车机完成配对" alone does not say whether the
+         * phone has no bond, the car rejected the bond, or the address is a
+         * stale one the car no longer knows. The bond state number and the
+         * device details make that readable without guessing.
+         */
+        log(
+            "配对状态检查：${peer.name ?: peer.address} bondState=${peer.bondState}" +
+                "（0=无 1=配对中 2=已配对 3=配对失败）" +
+                " 地址=${peer.address} 类型=${peer.type}",
+        )
+        check(peer.bondState == BluetoothDevice.BOND_BONDED) {
+            "请先在系统蓝牙设置中与车机完成配对（当前 bondState=${peer.bondState}）"
+        }
         bluetooth.cancelDiscovery()
         log("蓝牙链路：连接 ${peer.name ?: peerAddress}")
         val link = negotiate()
@@ -146,7 +162,7 @@ internal class BluetoothBootstrap(
             runCatching { session?.close() }
             runCatching { receiver?.join(1000) }
             val stream = openRestartStream(link.transport, restarted)
-            val next = Iap2Session.phoneBluetooth(stream, profile) { }
+            val next = Iap2Session.phoneBluetooth(stream, profile) { log("iAP2：$it") }
             owned += next
             // The new instance starts in detection mode and must answer the
             // car's marker and SYN before any CSM may be sent; sending 0x1D00
@@ -213,7 +229,19 @@ internal class BluetoothBootstrap(
         identifier = identityId,
         validateCertificates = access::validate,
         verifyChallenge = access::verifyAuthentication,
-        send = current::send,
+        send = { frame ->
+            // Mirror the inbound wire log. A session that will not come up is
+            // almost always "we sent X and the car answered nothing", and that
+            // is only readable if both directions are on the record.
+            log(
+                "蓝牙发 → id=0x${frame.messageId.toString(16)} " +
+                    "body=${frame.payload.size}B" +
+                    if (frame.payload.isNotEmpty()) {
+                        " hex=${frame.payload.take(16).joinToString(" ") { "%02X".format(it) }}"
+                    } else "",
+            )
+            current.send(frame)
+        },
         onStage = log,
         onEndpoint = { endpoint.complete(it) },
         onOther = { frame ->
@@ -330,6 +358,29 @@ internal class BluetoothBootstrap(
                     }
                     lastInboundNanos = System.nanoTime()
                     inboundFrames++
+                    /*
+                     * Log every inbound frame at the wire level.
+                     *
+                     * The high-level stages ("identified", "authenticated",
+                     * "waiting for wireless configuration") are not enough to
+                     * tell three very different situations apart:
+                     *
+                     *   - the car went completely silent
+                     *   - the car sent something we failed to parse
+                     *   - the car sent a retransmission of an earlier frame
+                     *
+                     * All three look identical in the stage log, and telling
+                     * them apart is the whole question when a session will not
+                     * come up. Sixteen bytes of hex is enough to recognise a
+                     * message id and a control session id.
+                     */
+                    log(
+                        "蓝牙收 ← id=0x${frame.messageId.toString(16)} " +
+                            "body=${frame.payload.size}B 第 $inboundFrames 帧" +
+                            if (frame.payload.isNotEmpty()) {
+                                " hex=${frame.payload.take(16).joinToString(" ") { "%02X".format(it) }}"
+                            } else "",
+                    )
                     runCatching { boot.receive(frame) }
                         .onFailure { log("处理车机消息失败：${it.message}") }
                 }
@@ -385,7 +436,7 @@ internal class BluetoothBootstrap(
             owned += connected
             val transport = PhoneBluetoothSessionTransport(BluetoothRfcommDuplexStream(connected) { })
             owned += transport
-            val session = Iap2Session.phoneBluetooth(transport.open(), candidate) { }
+            val session = Iap2Session.phoneBluetooth(transport.open(), candidate) { log("iAP2：$it") }
             owned += session
             if (session.awaitPhoneBluetoothReady(candidate)) {
                 log("iAP2 链路已同步（${if (outbound) "手机主动" else "车机回连"}）")
