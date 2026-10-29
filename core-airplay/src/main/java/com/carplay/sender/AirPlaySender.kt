@@ -442,32 +442,50 @@ class AirPlaySender(
         wire.cipher = ControlCipher(key("Control-Salt", "Control-Read-Encryption-Key"), key("Control-Salt", "Control-Write-Encryption-Key"))
         val timingPort = clock.listen(); resources += clock
         val setup = plist(wire.request("SETUP", "/", encode(mapOf(
-            "deviceID" to identity.id,
-            "name" to "CarPlay Android",
-            "model" to "Android",
-            "sourceVersion" to "320.17",
-            "sessionUUID" to java.util.UUID.randomUUID().toString(),
-            "timingPort" to timingPort,
             /*
-             * Three keys the 对照实现 sender sends and this one did not.
+             * 对照实现's SETUP body, recovered from 0.3.19 `C0281k1`.
              *
-             * Its SETUP (`C0142f1.I()`) builds exactly:
+             * Fourteen keys, in its order:
              *
-             *     "statsCollectionEnabled" -> false
-             *     "keepAliveLowPower"      -> true
-             *     "sessionCorrelationUUID" -> <uuid>
+             *     deviceID, macAddress, name, model, osName, osBuildVersion,
+             *     osVersion, sourceVersion, timingPort, sessionUUID,
+             *     sessionCorrelationUUID, statsCollectionEnabled,
+             *             keepAliveLowPower, features
              *
+             * This sender answers with ten — it had no `macAddress`, no OS
+             * identity and no `osVersion` at all, and described itself as
+             * `model="Android"`. 对照实现 declares a concrete iPhone
+             * (`model="iPhone14,2"`, `osName="iPhone OS"`, `osVersion="15.0.2"`,
+             * `osBuildVersion="19A404"`, `sourceVersion="566.25.21"`), and it is
+             * the sender observed holding this head unit open.
+             *
+             * Whether the car keys any behavior off these identity fields is
+             * not known — the 13.1 s teardown could well be indifferent to all
+             * of them. But declaring `Android` while pretending to be a CarPlay
+             * sender is a needless inconsistency, and matching a working sender
+             * field for field costs nothing.
+             */
+            "deviceID" to identity.id,
+            "macAddress" to identity.id.uppercase(),
+            "name" to "CarPlay Android",
+            "model" to "iPhone14,2",
+            "osName" to "iPhone OS",
+            "osBuildVersion" to "19A404",
+            "osVersion" to "15.0.2",
+            "sourceVersion" to "566.25.21",
+            "sessionUUID" to java.util.UUID.randomUUID().toString().uppercase(),
+            "timingPort" to timingPort,
+            "sessionCorrelationUUID" to java.util.UUID.randomUUID().toString().uppercase(),
+            /*
              * `statsCollectionEnabled=false` stops the car expecting periodic
              * statistics on the feedback channel. `keepAliveLowPower=true`
-             * selects the relaxed keep-alive profile — the earlier comment here
+             * selects the relaxed keep-alive profile — an earlier comment here
              * argued the opposite, but the sender that actually holds this car
              * open asks for low power from the start, and its keep-alive is an
              * explicit ping rather than a tight cadence.
-             * `sessionCorrelationUUID` ties this SETUP to the iAP2 session.
              */
             "statsCollectionEnabled" to false,
             "keepAliveLowPower" to true,
-            "sessionCorrelationUUID" to java.util.UUID.randomUUID().toString(),
             "features" to CONTROLLER_FEATURES,
         )), plistHeaders).body)
         val enabledFeatures = (setup["enabledFeatures"] as? List<*>)
@@ -1272,47 +1290,35 @@ class AirPlaySender(
                 put("sr", format.sampleRate)
             } else {
                 /*
-                 * Shape A — exactly what the iPhone sends to this car.
+                 * Shape A — 对照实现's audio SETUP, recovered from 0.3.19.
                  *
-                 * The sysdiagnose captures reduce every audio SETUP this unit
-                 * ever received to three shapes, and the PCM one has only four
-                 * keys:
+                 * Its `C0281k1` builds exactly six keys:
                  *
-                 *     audioFormat : 32768          (0x8000 = PCM 48k/2ch)
-                 *     audioType   : "media"
-                 *     audioLatencyMs : 32
-                 *     supportsHighAccuracyTimestamps : true
+                 *     { type:100, streamConnectionID, audioFormat, audioType,
+                 *       audioLatencyMs, supportsHighAccuracyTimestamps:TRUE }
                  *
-                 * and the car answers with type 100. With audioType "default"
-                 * on the same four keys it answers type 101.
+                 * with the profile `new S0(48000, 32768L, 250L, "media",
+                 * <source>)` — 48 kHz, 0x8000 (PCM stereo), 250 ms.
                  *
-                 * Earlier shapes here carried nine keys — `type`,
-                 * `streamConnectionID`, `spf`, `sr`, `ct` and `input` on top of
-                 * those four — and omitted `supportsHighAccuracyTimestamps`
-                 * entirely. `streamConnectionID` in particular cannot be right:
-                 * it is the value the *receiver* assigns, and the phone does not
-                 * know it until this very reply. Sending one is at best ignored
-                 * and at worst describes a different stream.
+                 * That sender runs on this exact car, so its shape is the
+                 * reference even where the iPhone capture disagrees: the phone
+                 * sends four keys with `audioLatencyMs: 32`, while 对照实现
+                 * sends six with 250 and `streamConnectionID`. Sending the
+                 * phone's five-key body was worth trying, but a sender known to
+                 * hold this car open beats a different sender on different
+                 * hardware — and the phone's own capture is from a session that
+                 * also ran over USB, where several of these fields come from
+                 * the accessory instead.
                  *
-                 * `supportsHighAccuracyTimestamps` is the one addition that
-                 * matters for sound quality: the iPhone sets it on every stream
-                 * it opens here, and it is what lets the car align our packets
-                 * against the RTP timestamps instead of guessing from arrival
-                 * time.
-                 *
-                 * AAC keeps its own shape (see [AAC_LATENCY_MS]): there the
-                 * phone does send `spf` and `controlPort`, because AAC needs the
-                 * receiver to report playout position for its rate control.
+                 * `supportsHighAccuracyTimestamps` is `Boolean.TRUE` there, not
+                 * false: 对照实现 always asks for timestamp alignment.
                  */
+                put("type", 100)
+                put("streamConnectionID", id)
                 put("audioFormat", audioFormat)
                 put("audioType", audioType)
                 put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
                 put("supportsHighAccuracyTimestamps", true)
-                if (!format.isPcm) {
-                    // AAC only: the receiver reports playout position here.
-                    put("spf", format.samplesPerPacket)
-                    put("streamConnectionID", id)
-                }
             }
         }
 
@@ -2432,29 +2438,16 @@ class AirPlaySender(
          */
         private const val ALT_AUDIO_OPUS_FORMAT = 0x40000000L
         /**
-         * Scheduling lead for LPCM, from the iPhone's own SETUP on this car.
+         * Scheduling lead for LPCM — 对照实现's value, not the iPhone's.
          *
-         * The sysdiagnose captures carry every audio SETUP the phone sent to
-         * this exact head unit, and they are unambiguous: 47 requests across
-         * six sessions reduce to three shapes with no exceptions —
-         *
-         *     format 32768  (PCM 0x8000)  media    audioLatencyMs = 32
-         *     format 32768  (PCM 0x8000)  default  audioLatencyMs = 32
-         *     format 8388608 (AAC 0x800000) media  audioLatencyMs = 1000
-         *
-         * So the two formats do not share a lead, and PCM's is not 250. 250
-         * came from 对照实现's default profile (`N0(48000, 32768L, 250L,
-         * "media", ...)`) and was never verified against this receiver; the
-         * iPhone asks for 32 ms on the same hardware.
-         *
-         * Getting this wrong is not cosmetic. audioLatencyMs is how far ahead
-         * of playback the receiver should schedule what we send, so an eight
-         * times too large value tells the car to hold every packet far longer
-         * than it needs to. Combined with a source that only starts producing
-         * when the driver presses play, that is the whole shape of the
-         * "声音要等很久才出来" complaint.
+         * The sysdiagnose captures show the phone asking for 32 ms on this car
+         * with a four-key body. 对照实现 asks for 250 ms with a six-key body,
+         * and 对照实现 is the sender actually observed holding this head unit
+         * open. Two different senders on two different transports is not an
+         * experiment that isolates the latency field, so the value that ships
+         * is the one from the sender whose behavior is known here.
          */
-        private const val PCM_LATENCY_MS = 32
+        private const val PCM_LATENCY_MS = 250
 
         /**
          * The capture exposes these as HAL input/output sample buffers (IL/OL).

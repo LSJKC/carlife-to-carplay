@@ -542,76 +542,46 @@ internal class AirPlayLink(
                             System.nanoTime() >= nextIdentifyRetry
                         ) {
                             /*
-                             * Bounded retry of whatever this phase is waiting
-                             * for. On the command tunnel the bootstrap now runs
-                             * authentication-first, so the repeat before
-                             * 0xAA01 re-asks for authentication and only the
-                             * later ones re-send 0x1d00; [PhoneBootstrap.begin]
-                             * decides which, and refuses to restart an exchange
-                             * the car is already midway through.
+                             * Ask for identification once, then wait for the car.
                              *
-                             * The cap used to be 3, sized against the 3 s
-                             * interval that has since been cut to 800 ms. With
-                             * that interval three attempts are spent inside
-                             * 2.4 s, which is shorter than the car's own 2.8 s
-                             * post-restart window — the cap would have exhausted
-                             * itself before the first restart even arrived
-                             * (which is why the old captures show a fresh
-                             * 0x1D00 landing every 3 s and nothing after the
-                             * fourth). Raise it so attempts keep pace with the
-                             * window instead of being rationed against it.
+                             * This used to rotate 0xAA06 / 0xAA00 / 0x1D00 every
+                             * 800 ms on the theory that one of them would be the
+                             * message this firmware answered. 对照实现's own
+                             * state machine, recovered from 0.3.19
+                             * (`C0003a1.b()`, dispatched on the car's message id),
+                             * shows that is the wrong shape:
+                             *
+                             *   0x1D01 -> reply 0x1D02; if not yet authenticated
+                             *             send 0xAA00 carrying the challenge
+                             *   0xAA01 -> parse the certificate, send 0xAA02
+                             *             with a fresh random challenge
+                             *   0xAA03 -> verify the signature; on success send
+                             *             0xAA05, and only then 0x1D00
+                             *   0xAA04 -> authentication failed
+                             *   0xAA06 -> if nothing has been sent yet, send 0xAA00
+                             *   default -> ignore
+                             *
+                             * It never volunteers a message the car did not ask
+                             * for, and it opens with 0x1D00 exactly once. Every
+                             * message it sends is a direct reply to one it just
+                             * received. [PhoneBootstrap] already implements that
+                             * dispatch; this loop was the part fighting it.
+                             *
+                             * So: one opening message, then silence. If the car
+                             * says nothing, saying more cannot help — and on this
+                             * head unit it appears to hurt, because fourteen
+                             * unsolicited CSMs inside the 13.1 s window is a very
+                             * different thing from the two the car itself sends.
                              */
                             identifyRetries++
                             identifyRequested++
-                            /*
-                             * Rotate through the opening messages.
-                             *
-                             * Three senders disagree about what the car answers
-                             * on this transport, and no capture has yet shown
-                             * it answer any of them:
-                             *
-                             *   0xAA00  what the reference sender opens with
-                             *           on this car after a link restart, as
-                             *           part of 0xAA00 -> 0xAA01 -> 0xAA03 ->
-                             *           0xAA05 -> 0x1D00 -> 0x1D01
-                             *   0xAA06  what 对照实现 opens with
-                             *           ("网络 AA06 没有证书缓存，无法认证")
-                             *   0x1D00  what the Bluetooth link needs, and
-                             *           what every build so far sent here
-                             *
-                             * Rotating costs nothing and makes one session
-                             * self-describing: whichever message the car
-                             * finally answers is the one printed next to the
-                             * answer. The 800 ms interval means all three are
-                             * on the wire inside one post-restart window.
-                             */
-                            when (identifyRetries % 3) {
-                                1 -> control.requestCertificate()   // 0xAA06
-                                2 -> control.beginWithAuthentication() // 0xAA00
-                                else -> control.begin()             // 0x1D00
-                            }
-                            nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
-                                /*
-                                 * Shorter than the car's own restart window.
-                                 *
-                                 * After the car reopens the link it waits about
-                                 * 2.8 s before destroying the session (measured
-                                 * at 2764/2871/2898 ms across three captures).
-                                 * A 3 s retry interval is longer than that, so a
-                                 * bootstrap driven by this timer — rather than
-                                 * by the restart itself — always lands after the
-                                 * car has already given up. 800 ms leaves room
-                                 * for the link layer to settle and still fits
-                                 * three attempts inside the window.
-                                 */
-                                COMMAND_IAP_RETRY_MILLIS,
-                            )
+                            control.begin()
+                            nextIdentifyRetry = Long.MAX_VALUE
                             val stage = control.status()
                             log(
-                                "Wi-Fi iAP2 引导重试 #$identifyRetries：" +
+                                "Wi-Fi iAP2 引导：已发 0x1D00（模式=等待车机），之后不再主动发送；" +
                                     "identified=${stage.identified} authenticated=${stage.authenticated} " +
-                                    "certificate=${stage.certificateReceived} " +
-                                    "已发识别=${identifyRequested} 已收CSM=$csmReceived",
+                                    "certificate=${stage.certificateReceived} 已收CSM=$csmReceived",
                             )
                         }
                         if (System.nanoTime() - lastReport >= TimeUnit.SECONDS.toNanos(5)) {
@@ -646,52 +616,38 @@ internal class AirPlayLink(
                          */
                         if (linkRestarted.compareAndSet(true, false)) {
                             /*
-                             * Replay the bootstrap the moment the new link is up.
+                             * A link restart resets the exchange and re-arms
+                             * exactly one opening message.
                              *
-                             * 1.3.2 tried the opposite here, on the reading of
-                             * the reference sender's "不重发 RECORD、不改变屏幕
-                             * 归属" (`V0`) rule that a session already streaming
-                             * should stay silent across a link restart. The
-                             * 1.3.2 field capture shows that reading is wrong.
+                             * 对照实现 says this in its own words (`V0`,
+                             * recovered from 0.3.19):
                              *
-                             * Measured over four sessions on this car, the car
-                             * reopens the link about 10.2 s after RECORD and
-                             * destroys the session 2.8 s later:
+                             *   "IAPLINK: 网络认证及状态 ACK 就绪；不重发 RECORD、
+                             *    不改变屏幕归属"
                              *
-                             *     19988 marker -> 20002 new SYN -> 22752 reset
-                             *     17684 marker -> 17690 new SYN -> 20555 reset
-                             *     15728 marker -> 15735 new SYN -> 18626 reset
-                             *     16933 marker -> 16940 new SYN -> 18372 reset
+                             * and its state machine keeps `u` (identified) and
+                             * `k` (authenticated) as the only two flags, clearing
+                             * them with the link and never volunteering a message
+                             * the car did not ask for. Its `0x1D00` is sent from
+                             * exactly two places: once as the opening move, and
+                             * again after a successful `0xAA05` when `u` is still
+                             * false.
                              *
-                             * The link layer already answers the new SYN/ACK;
-                             * what stayed silent in 1.3.2 was everything above
-                             * it, because the quiet branch set the retry timer
-                             * to `Long.MAX_VALUE` and the bootstrap never ran.
-                             * The car then gave up. The reference sender's own
-                             * trace does the reverse — a complete second round
-                             * (0xAA00 -> 0xAA01 -> 0xAA03 -> 0xAA05 -> 0x1D00
-                             * -> 0x1D01) starts one millisecond after its
-                             * link-restart — and it is the sender that holds
-                             * this same car open for 110 s.
-                             *
-                             * So the restart always replays, immediately, and
-                             * the 2.5 s/3 s retry timers are bypassed: the car's
-                             * window after a restart (2.8 s) is shorter than the
-                             * retry interval (3.0 s), so a timer-driven bootstrap
-                             * could not have answered it in time even when the
-                             * quiet branch was not taken. That is why the earlier
-                             * captures showed a fresh 0x1D00 landing *after* the
-                             * window had already closed.
+                             * So the restart clears the negotiated state and sends
+                             * one 0x1D00. It no longer replays a full round on a
+                             * timer — that is what produced fourteen unsolicited
+                             * CSMs inside a 13.1 s window on the field capture,
+                             * against the two the car itself sent.
                              */
                             control.restartForNewLink()
-                            identifyRetries = 0
-                            log(
-                                "车机重开了 iAP2 链路：立即在新链路上重放引导" +
-                                    "（推流中=${sender?.isStreaming() == true}，" +
-                                    "车机给的窗口约 2.8 秒，不等重试定时器）",
-                            )
-                            nextIdentifyRetry = System.nanoTime()
+                            identifyRetries = 1
+                            identifyRequested++
                             control.begin()
+                            nextIdentifyRetry = Long.MAX_VALUE
+                            log(
+                                "车机重开了 iAP2 链路：清空协商状态并重发一次 0x1D00，" +
+                                    "之后等待车机（推流中=${sender?.isStreaming() == true}）",
+                            )
                         }
                         val frame = runtime.recv(1000) ?: continue
                         csmReceived++
