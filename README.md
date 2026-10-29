@@ -88,8 +88,8 @@ CarLife。两边各有一套完整实现，中间却不通。
 要求：JDK 17+、Android SDK 34+。
 
 ```bash
-git clone https://github.com/<you>/carlink-cast.git
-cd carlink-cast
+git clone https://github.com/<you>/carlife-to-carplay.git
+cd carlife-to-carplay
 echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 ./gradlew :app:assembleDebug
 ```
