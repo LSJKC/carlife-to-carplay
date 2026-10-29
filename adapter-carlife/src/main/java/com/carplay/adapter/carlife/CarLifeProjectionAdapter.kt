@@ -88,6 +88,30 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      */
     @Volatile
     private var _panel: CarLifePanel? = null
+    /**
+     * Forward CarLife's H.264 untouched instead of compositing and re-encoding.
+     *
+     * The pipeline already supports both: when no compositor is running the
+     * decoded frame is handed to the sender as-is
+     * (`sink(VideoPackets.lengthPrefixed(frame.data), …)`). This flag selects
+     * that branch deliberately instead of only using it as a fallback.
+     *
+     * a-sender — the other Android-CarPlay-sender project, and the one whose
+     * author runs the same Honor CarLife build this app targets — forwards
+     * untouched H.264 and nothing else. Its README is explicit that the
+     * passthrough is the design: it hijacks CarLife's encoder output and
+     * declares the car's canvas in VideoConfig, never re-encoding.
+     *
+     * For this app the trade is: the full-canvas compositor can paint a
+     * wallpaper outside the safe area, but costs a decode + encode round trip
+     * and a whole extra MediaCodec. Passthrough gives up the wallpaper and
+     * gains the shortest possible path. Worth having as a switch because it is
+     * also the cleanest way to tell whether a session-level problem lives in
+     * the encoder stage at all.
+     */
+    @Volatile
+    var passthroughVideo: Boolean = false
+
     var panel: CarLifePanel?
         get() = _panel
         set(value) {
@@ -777,6 +801,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                 observer?.failed(error)
             },
             container = this,
+            passthrough = passthroughVideo,
         )
         val publisher = CarLifeMediaPublisher(
             checkNotNull(hostContext),

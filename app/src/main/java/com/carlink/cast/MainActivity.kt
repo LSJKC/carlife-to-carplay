@@ -889,6 +889,12 @@ class MainActivity : AppCompatActivity() {
             settings.carLifeAutoSession,
         ) { settings.carLifeAutoSession = it })
 
+        content.addView(toggleRow(
+            getString(R.string.settings_video_passthrough),
+            getString(R.string.settings_video_passthrough_detail),
+            settings.videoPassthrough,
+        ) { settings.videoPassthrough = it })
+
         // The first connection has to be started from Honor's own Car Connect
         // page: that flow is what grants CarLife its wireless pairing. Those
         // activities are exported=false, so this app cannot start the connect

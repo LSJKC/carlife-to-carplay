@@ -99,6 +99,26 @@ internal class CarLifeSession(
      * the session starts, so this snapshot is stable and safe to use.
      */
     private val container: CarLifeProjectionAdapter? = null,
+    /**
+     * Ask CarLife to encode the full panel and forward its H.264 untouched.
+     *
+     * With a safe-area policy on, this app asks CarLife to encode the safe
+     * rectangle (1408x476 here) and then composites that 1:1 onto the panel.
+     * That is what makes wallpaper around the safe area possible, and it is
+     * also what forces a decode + re-encode round trip.
+     *
+     * Passthrough instead asks CarLife for the panel size itself and forwards
+     * the encoder output as-is, exactly the way a-sender does on the same
+     * Honor CarLife build. The cost is the wallpaper; the gain is that there is
+     * no second MediaCodec and no re-encode in the path.
+     *
+     * The coded size has to follow the mode. A receiver builds its decoder for
+     * the canvas it announced in SETUP, so forwarding a 1408x476 stream to a
+     * car expecting 1972x520 decodes to nothing — which is the "black screen
+     * and an endless key-frame request" this app used to see whenever the
+     * compositor was unavailable.
+     */
+    private val passthrough: Boolean = false,
 ) : AutoCloseable {
 
     private val running = AtomicBoolean(false)
@@ -753,12 +773,25 @@ internal class CarLifeSession(
          * outside) so CarLife knows where the car's edge overlays sit relative
          * to its canvas.
          */
-        val sourceWidth = if (useSafeAreaSource) area.safeWidth else area.panelWidth
-        val sourceHeight = if (useSafeAreaSource) area.safeHeight else area.panelHeight
+        val sourceWidth = if (passthrough) {
+            area.panelWidth
+        } else if (useSafeAreaSource) {
+            area.safeWidth
+        } else {
+            area.panelWidth
+        }
+        val sourceHeight = if (passthrough) {
+            area.panelHeight
+        } else if (useSafeAreaSource) {
+            area.safeHeight
+        } else {
+            area.panelHeight
+        }
 
         log(
             "编码器几何：AirPlay 全画布 ${area.panelWidth}x${area.panelHeight}，" +
-                "CarLife 源=${sourceWidth}x$sourceHeight (全画布比例)，" +
+                "CarLife 源=${sourceWidth}x$sourceHeight " +
+                if (passthrough) "(直通模式，不合成)" else "(全画布比例)，" +
                 "安全区元数据=${area.safeWidth}x${area.safeHeight}@(${area.safeX},${area.safeY})",
         )
         return CarLifeProto.videoEncoderInfo(

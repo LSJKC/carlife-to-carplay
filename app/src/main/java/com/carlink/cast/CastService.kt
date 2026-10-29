@@ -159,7 +159,20 @@ class CastService : Service() {
             // panel and re-encoded. Without this processor the raw CarLife frames
             // go straight to the car, which decodes nothing and asks for a key
             // frame forever while the screen stays black.
-            carLife.videoProcessor = CarLifePanelCompositor(panel)
+            //
+            // Passthrough mode deliberately skips all of that. CarLife is asked
+            // for the panel size instead of the safe rectangle (see
+            // CarLifeSession's `passthrough`), so its stream already carries the
+            // canvas the car declared and can be forwarded untouched — the shape
+            // a-sender uses on this same Honor CarLife build. The trade is the
+            // wallpaper the compositor paints outside the safe area.
+            val passthrough = settings.videoPassthrough
+            carLife.passthroughVideo = passthrough
+            if (passthrough) {
+                CastLog.event("INFO", "视频直通模式：不合成、不重编码，CarLife 编码尺寸=全画布")
+            } else {
+                carLife.videoProcessor = CarLifePanelCompositor(panel)
+            }
             return carLife
         }
         if (mode == SourceMode.CARLIFE) error("未找到手机自带的 CarLife 应用")

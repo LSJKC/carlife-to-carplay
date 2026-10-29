@@ -101,6 +101,23 @@ class CastSettings(context: Context) {
         get() = prefs.getInt(KEY_FRAME_RATE, 0)
         set(value) = prefs.edit().putInt(KEY_FRAME_RATE, value.coerceIn(0, 120)).apply()
 
+    /**
+     * Forward CarLife's H.264 untouched instead of compositing and re-encoding.
+     *
+     * Off by default: the compositor is what paints wallpaper outside the safe
+     * area, and that is the picture this app is built around. On, the pipeline
+     * skips the decode/composite/encode stage entirely and CarLife is asked to
+     * encode the full panel instead of the safe rectangle — the shape a-sender
+     * uses on the same Honor CarLife build.
+     *
+     * Kept as a setting rather than a build-time choice because it doubles as a
+     * measurement: it removes the whole encoder stage from the path, so if a
+     * session-level problem persists with it on, that stage is not the cause.
+     */
+    var videoPassthrough: Boolean
+        get() = prefs.getBoolean(KEY_VIDEO_PASSTHROUGH, false)
+        set(value) = prefs.edit().putBoolean(KEY_VIDEO_PASSTHROUGH, value).apply()
+
     fun safeAreaPolicy(endpoint: String? = peerAddress): CarPanelGeometry.SafeAreaPolicy {
         val scope = safeAreaScope(endpoint)
         val mode = when (prefs.getString("$scope:mode", null)) {
@@ -262,6 +279,7 @@ class CastSettings(context: Context) {
         const val KEY_CARLIFE_AUTO_SESSION = "carLifeAutoSession"
         const val KEY_FRAME_RATE = "frameRateOverride"
         const val KEY_SAFE_AREA_ENABLED = "safeAreaEnabled"
+        const val KEY_VIDEO_PASSTHROUGH = "videoPassthrough"
         const val KEY_BT = "manualBluetoothAddress"
         const val KEY_IDENTITY = "identity"
         const val KEY_STORE = "carlink-storage"
