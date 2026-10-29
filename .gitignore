@@ -29,3 +29,14 @@ gradle.properties.local
 # Artifacts
 *.jar
 *.aar
+
+# Signing material — never commit
+*.jks
+*.keystore
+keystore.properties
+
+# Decompiled artifacts (never commit; these are generated from our own APKs)
+_decompiled*/
+dist/
+diagnostics/
+*.log
