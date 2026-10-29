@@ -122,13 +122,20 @@ internal class BluetoothBootstrap(
          * After unpairing on both sides this is the first thing that fails, and
          * "请先在系统蓝牙设置中与车机完成配对" alone does not say whether the
          * phone has no bond, the car rejected the bond, or the address is a
-         * stale one the car no longer knows. The bond state number and the
-         * device details make that readable without guessing.
+         * stale one the car no longer knows.
+         *
+         * The bond-state constants are the hidden `BluetoothDevice.BOND_*`
+         * values, not 0..3 — an earlier version of this comment said 0/1/2/3
+         * and that is simply wrong: 10 is none, 11 is bonding, 12 is bonded.
+         * Printing the device type matters too, because iAP2 runs over classic
+         * RFCOMM and a dual-mode device paired over LE reports type 3 as well —
+         * the link parameters differ sharply between the two.
          */
         log(
             "配对状态检查：${peer.name ?: peer.address} bondState=${peer.bondState}" +
-                "（0=无 1=配对中 2=已配对 3=配对失败）" +
-                " 地址=${peer.address} 类型=${peer.type}",
+                "（10=无 11=配对中 12=已配对）" +
+                " 地址=${peer.address} 类型=${peer.type}" +
+                "（1=经典 2=LE 3=双模）",
         )
         check(peer.bondState == BluetoothDevice.BOND_BONDED) {
             "请先在系统蓝牙设置中与车机完成配对（当前 bondState=${peer.bondState}）"
@@ -440,6 +447,35 @@ internal class BluetoothBootstrap(
             owned += session
             if (session.awaitPhoneBluetoothReady(candidate)) {
                 log("iAP2 链路已同步（${if (outbound) "手机主动" else "车机回连"}）")
+                /*
+                 * The peer's link parameters decide whether the session can
+                 * progress at all, so print them on their own line.
+                 *
+                 * `peerMaxLength` is the largest frame this car says it can
+                 * receive, and the car computes it from the transport, not from
+                 * anything we send. Two field sessions on the same hardware:
+                 *
+                 *     peerMaxLength=65535  -> the car answers 0x4300 with a
+                 *                             second iAP2 round in ~3 s
+                 *     peerMaxLength=2048   -> the car only sends empty link
+                 *                             ACKs and goes silent for 18 s
+                 *
+                 * 0x4301 (the wireless configuration: SSID, passphrase, port,
+                 * public key) is far larger than 2048 bytes, so a 2048-byte
+                 * peer limit means the exchange that has to follow cannot
+                 * happen at all. That is worth seeing at a glance rather than
+                 * buried in the LINK trace.
+                 */
+                session.handshakeStatus().peerSynchronization?.let { sync ->
+                    log(
+                        "车机链路参数：peerMaxLength=${sync.maxLength} " +
+                            "peerWindow=${sync.maxOutgoing} peerRto=${sync.retransmissionTimeoutMillis}ms" +
+                            if (sync.maxLength < CARPLAY_MIN_USEFUL_MAX_LENGTH) {
+                                " ⚠ 小于 $CARPLAY_MIN_USEFUL_MAX_LENGTH，" +
+                                    "0x4301 无线配置无法传输（多半是配对走了 LE 或链路退化，请重新配对）"
+                            } else "",
+                    )
+                }
                 return Link(connected, session, transport)
             }
             log("iAP2 同步未完成，换下一个握手方案")
@@ -514,5 +550,16 @@ internal class BluetoothBootstrap(
 
         /** The car's iAP2 service the phone dials. */
         val ACCESSORY_UUID: UUID = UUID.fromString("00000000-deca-fade-deca-deafdecacaff")
+
+        /**
+         * A peer `maxLength` below this cannot carry the wireless configuration.
+         *
+         * The 0x4301 message this session is waiting for holds an SSID, a
+         * passphrase, a port and a 32-byte public key — comfortably past 2 KiB
+         * even before iAP2 framing. Measured on this car: 65535 lets the
+         * exchange proceed, 2048 leaves the car sending nothing but empty link
+         * ACKs until the watchdog fires.
+         */
+        private const val CARPLAY_MIN_USEFUL_MAX_LENGTH = 8192
     }
 }
