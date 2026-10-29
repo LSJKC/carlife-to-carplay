@@ -1272,29 +1272,47 @@ class AirPlaySender(
                 put("sr", format.sampleRate)
             } else {
                 /*
-                 * Shape A — the reference sender's body on this car, verbatim.
+                 * Shape A — exactly what the iPhone sends to this car.
                  *
-                 * Its audio SETUP on the E2LB is exactly nine keys:
+                 * The sysdiagnose captures reduce every audio SETUP this unit
+                 * ever received to three shapes, and the PCM one has only four
+                 * keys:
                  *
-                 *     type, audioType, audioFormat, streamConnectionID,
-                 *     audioLatencyMs, spf, sr, ct, input
+                 *     audioFormat : 32768          (0x8000 = PCM 48k/2ch)
+                 *     audioType   : "media"
+                 *     audioLatencyMs : 32
+                 *     supportsHighAccuracyTimestamps : true
                  *
-                 * Note what is NOT there: no `controlPort`, and no
-                 * `supportsRTPPacketRedundancy`. The earlier shape A carried
-                 * controlPort and omitted type/streamConnectionID/ct/sr, and
-                 * this car answered it with an empty 42-byte body — the SETUP
-                 * was rejected and the code fell back to shape B on every
-                 * session. The reference sender needs no fallback.
+                 * and the car answers with type 100. With audioType "default"
+                 * on the same four keys it answers type 101.
+                 *
+                 * Earlier shapes here carried nine keys — `type`,
+                 * `streamConnectionID`, `spf`, `sr`, `ct` and `input` on top of
+                 * those four — and omitted `supportsHighAccuracyTimestamps`
+                 * entirely. `streamConnectionID` in particular cannot be right:
+                 * it is the value the *receiver* assigns, and the phone does not
+                 * know it until this very reply. Sending one is at best ignored
+                 * and at worst describes a different stream.
+                 *
+                 * `supportsHighAccuracyTimestamps` is the one addition that
+                 * matters for sound quality: the iPhone sets it on every stream
+                 * it opens here, and it is what lets the car align our packets
+                 * against the RTP timestamps instead of guessing from arrival
+                 * time.
+                 *
+                 * AAC keeps its own shape (see [AAC_LATENCY_MS]): there the
+                 * phone does send `spf` and `controlPort`, because AAC needs the
+                 * receiver to report playout position for its rate control.
                  */
-                put("type", streamType)
-                put("audioType", audioType)
                 put("audioFormat", audioFormat)
-                put("streamConnectionID", id)
+                put("audioType", audioType)
                 put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
-                put("spf", format.samplesPerPacket)
-                put("sr", format.sampleRate)
-                put("ct", if (format.isPcm) 1 else 4)
-                put("input", false)
+                put("supportsHighAccuracyTimestamps", true)
+                if (!format.isPcm) {
+                    // AAC only: the receiver reports playout position here.
+                    put("spf", format.samplesPerPacket)
+                    put("streamConnectionID", id)
+                }
             }
         }
 
@@ -2414,16 +2432,29 @@ class AirPlaySender(
          */
         private const val ALT_AUDIO_OPUS_FORMAT = 0x40000000L
         /**
-         * Scheduling lead for LPCM.
+         * Scheduling lead for LPCM, from the iPhone's own SETUP on this car.
          *
-         * 250 ms is what the 对照实现 sender negotiates on its default audio
-         * profile (`E()` -> `N0(48000, 32768L, 250L, "media", ...)`), and that
-         * sender is the one known to hold a session open on this car class.
-         * Earlier values here were 100 (a different reference) and 1000 (a
-         * guess from another firmware); with 352-sample packets a full second
-         * of lead meant the receiver buffered far more than it needed.
+         * The sysdiagnose captures carry every audio SETUP the phone sent to
+         * this exact head unit, and they are unambiguous: 47 requests across
+         * six sessions reduce to three shapes with no exceptions —
+         *
+         *     format 32768  (PCM 0x8000)  media    audioLatencyMs = 32
+         *     format 32768  (PCM 0x8000)  default  audioLatencyMs = 32
+         *     format 8388608 (AAC 0x800000) media  audioLatencyMs = 1000
+         *
+         * So the two formats do not share a lead, and PCM's is not 250. 250
+         * came from 对照实现's default profile (`N0(48000, 32768L, 250L,
+         * "media", ...)`) and was never verified against this receiver; the
+         * iPhone asks for 32 ms on the same hardware.
+         *
+         * Getting this wrong is not cosmetic. audioLatencyMs is how far ahead
+         * of playback the receiver should schedule what we send, so an eight
+         * times too large value tells the car to hold every packet far longer
+         * than it needs to. Combined with a source that only starts producing
+         * when the driver presses play, that is the whole shape of the
+         * "声音要等很久才出来" complaint.
          */
-        private const val PCM_LATENCY_MS = 250
+        private const val PCM_LATENCY_MS = 32
 
         /**
          * The capture exposes these as HAL input/output sample buffers (IL/OL).
