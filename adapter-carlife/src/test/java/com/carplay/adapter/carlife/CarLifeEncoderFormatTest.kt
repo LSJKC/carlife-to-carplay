@@ -22,11 +22,16 @@ class CarLifeEncoderFormatTest {
                 "save_area_y" to 44,
                 "need_adapter_screen" to 1,
                 "draw_ui_outside_safe_area" to 0,
+                // width/height are part of the reply on purpose: CarLife reads
+                // exactly these two keys back from carlife_encode_format and, when
+                // they are absent, keeps encoding at its built-in default — which is
+                // what made the picture soft. They describe the panel the head unit
+                // negotiated, not the safe rectangle.
+                "width" to 1972,
+                "height" to 520,
             ),
             format?.mediaFormatOverrides(),
         )
-        assertEquals(null, format?.mediaFormatOverrides()?.get("width"))
-        assertEquals(null, format?.mediaFormatOverrides()?.get("height"))
     }
 
     @Test
@@ -43,6 +48,8 @@ class CarLifeEncoderFormatTest {
                 "save_area_y" to 44,
                 "need_adapter_screen" to 0,
                 "draw_ui_outside_safe_area" to 0,
+                "width" to 1972,
+                "height" to 520,
             ),
             format?.mediaFormatOverrides(),
         )

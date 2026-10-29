@@ -1331,7 +1331,17 @@ class AirPlaySender(
                  * `supportsHighAccuracyTimestamps` is `Boolean.TRUE` there, not
                  * false: 对照实现 always asks for timestamp alignment.
                  */
-                put("type", 100)
+                /*
+                 * `type` is the stream's negotiated type, not a constant.
+                 *
+                 * 1.3.10 hardcoded 100 here while copying 对照实现's body.
+                 * That is right for PCM and wrong for every other format: an
+                 * AAC session negotiated type 102 and then announced itself as
+                 * 100, so the receiver answered for a codec that was never
+                 * offered. Caught by
+                 * alternate44100AacUsesNegotiatedTypeAndRealRtpClock.
+                 */
+                put("type", streamType)
                 put("streamConnectionID", id)
                 put("audioFormat", audioFormat)
                 put("audioType", audioType)

@@ -76,7 +76,7 @@ class RtspWire(
     /** Sends a command without reading its response; the channel's reader owns all reads. */
     @Synchronized fun sendCommand(body: ByteArray, headers: Map<String, String> = emptyMap()) {
         val seq = nextSequence()
-        val all = linkedMapOf("CSeq" to seq.toString(), "User-Agent" to "AirPlay/320.17", "Content-Length" to body.size.toString())
+        val all = linkedMapOf("CSeq" to seq.toString(), "User-Agent" to AIRPLAY_USER_AGENT, "Content-Length" to body.size.toString())
         session?.let { all["Session"] = it }
         all.putAll(headers)
         write("POST /command RTSP/1.0", all, body)
@@ -101,7 +101,7 @@ class RtspWire(
         ignoredResponses += seq
         val all = linkedMapOf(
             "CSeq" to seq,
-            "User-Agent" to "AirPlay/320.17",
+            "User-Agent" to AIRPLAY_USER_AGENT,
             "Content-Length" to body.size.toString(),
         )
         session?.let { all["Session"] = it }
@@ -113,7 +113,7 @@ class RtspWire(
     @Synchronized fun request(method: String, path: String, body: ByteArray = ByteArray(0), headers: Map<String, String> = emptyMap(), receive: ((ControlMessage) -> Unit)? = null): ControlMessage {
         require(method.matches(Regex("[A-Z_]+")) && '\r' !in path && '\n' !in path)
         val seq = nextSequence()
-        val all = linkedMapOf("CSeq" to seq.toString(), "User-Agent" to "AirPlay/320.17", "Content-Length" to body.size.toString())
+        val all = linkedMapOf("CSeq" to seq.toString(), "User-Agent" to AIRPLAY_USER_AGENT, "Content-Length" to body.size.toString())
         session?.let { all["Session"] = it }
         all.putAll(headers)
         write("$method $path RTSP/1.0", all, body)
@@ -175,4 +175,17 @@ class RtspWire(
     }
     private fun nextSequence(): Long = synchronized(sequenceLock) { ++sequence }
     override fun close() { release() }
+
+    private companion object {
+        /**
+         * `User-Agent: AirPlay/566.25.21` — 对照实现 0.3.19's value.
+         *
+         * It is the same build number it declares as `sourceVersion` in SETUP
+         * (`C0281k1`), so the two are not independent knobs: a sender that
+         * claims 566.25.21 in one place and 320.17 in another is describing
+         * itself inconsistently. Every request this wire writes used to carry
+         * `AirPlay/320.17`.
+         */
+        const val AIRPLAY_USER_AGENT = "AirPlay/566.25.21"
+    }
 }
