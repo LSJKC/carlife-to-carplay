@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
 }
@@ -7,27 +9,41 @@ android {
     compileSdk = 36
 
     /**
-     * One fixed signing key for every build.
+     * Signing key, read from a local file that is never committed.
      *
-     * Debug builds used to carry the throw-away `CN=Android Debug` key that the
-     * build tooling regenerates per machine. Android refuses to install an APK
-     * whose signer differs from the installed copy, so an update over a build
-     * made elsewhere — or after the debug key was recreated — failed with a bare
-     * "安装失败". This key never changes, so updates apply cleanly.
+     * `keystore.properties` (already in .gitignore) supplies:
+     *
+     *     storeFile=carlink-release.jks
+     *     storePassword=…
+     *     keyAlias=carlink
+     *     keyPassword=…
+     *
+     * When it is absent — which is the case for anyone who clones this repo —
+     * the build falls back to the standard debug key. That keeps a fresh
+     * checkout building without shipping a private key or its password in the
+     * source tree.
      */
+    val keystorePropsFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+    }
+    val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
+
     signingConfigs {
-        create("stable") {
-            storeFile = rootProject.file("carlink-release.jks")
-            storePassword = "carlink2026"
-            keyAlias = "carlink"
-            keyPassword = "carlink2026"
+        if (hasReleaseKeystore) {
+            create("stable") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
 
     buildTypes {
-        getByName("debug") { signingConfig = signingConfigs.getByName("stable") }
+        getByName("debug") { signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "stable" else "debug") }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("stable")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "stable" else "debug")
             isMinifyEnabled = false
         }
     }
