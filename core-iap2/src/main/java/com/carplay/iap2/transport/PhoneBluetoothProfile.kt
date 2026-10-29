@@ -50,25 +50,32 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
             synchronizationOverride = synchronization,
             negotiateControlSession = true,
             /*
-             * Echo a repeated detection marker instead of dying on it.
+             * Only the Wi-Fi command tunnel echoes a repeated marker.
              *
-             * Both profiles here are used against firmware that keeps sending
-             * the six-byte marker while the link is up:
+             * 1.3.9 extended this to ACCESSORY_FIRST on the theory that the
+             * Buick repeats the marker on Bluetooth too and was being killed by
+             * the terminal behavior. That was wrong, and 1.3.7 versus 1.3.14
+             * proves it: the same car, the same app otherwise —
              *
-             *   COMMAND_TUNNEL     the Wi-Fi command channel (fixed in 1.2.80)
-             *   ACCESSORY_FIRST    the Buick E2LB Bluetooth link (fixed here)
+             *     1.3.7   no echo on Bluetooth -> the link layer calls die(),
+             *             the caller rebuilds, and the car starts its second
+             *             iAP2 round at 2354 ms. Connection succeeds.
              *
-             * On the Buick the old terminal behavior cost the media message:
-             * the 1.3.7 capture shows `NowPlaying 发送失败：车机在控制阶段重新
-             * 发送 iAP2 检测包，旧链路已结束` every two seconds, which is why
-             * the head unit never leaves "正在加载媒体".
+             *     1.3.14+ echoes the marker at 2572 ms -> the car answers with
+             *             LINK-RESTART at 2637 ms and then goes completely
+             *             silent. It never starts the second round, and the
+             *             session dies on the 20 s watchdog.
              *
-             * VIVO_ACCESSORY_FIRST keeps the old behavior deliberately —
-             * PhoneBluetoothHandshakeTest asserts that a repeated marker ends
-             * the link on that firmware, and no capture has shown it sending
-             * one mid-session.
+             * So on this firmware the repeated marker IS the car asking for the
+             * link to be torn down and rebuilt. Answering it keeps a link alive
+             * that the car has already abandoned, which is the one thing that
+             * stops the rebuild from happening.
+             *
+             * COMMAND_TUNNEL keeps the echo: there dropping the marker is what
+             * produced the 12.9 s teardown fixed in 1.2.80, and the two
+             * transports demonstrably want opposite behavior.
              */
-            ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL || this == ACCESSORY_FIRST,
+            ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL,
             maximumInFlightPackets = 1,
         )
     }
