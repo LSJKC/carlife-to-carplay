@@ -200,6 +200,10 @@ class AirPlaySender(
     /** Last sampleTime the receiver reported for our audio stream, and how often. */
     @Volatile private var receiverAudioSampleTime: Long = -1L
     @Volatile private var receiverFeedbackCount = 0L
+    /** `timestampRawNs` from the same feedback entry, unused for control but logged. */
+    @Volatile private var receiverFeedbackNanos: Long = -1L
+    /** The connection id the receiver assigned to our audio stream, once it has told us. */
+    @Volatile private var audioStreamConnectionId: Long = 0L
     /** /feedback requests written; diagnostics only. */
     @Volatile private var feedbackCount = 0L
     @Volatile private var lastFeedbackReportAt = 0L
@@ -430,7 +434,31 @@ class AirPlaySender(
     fun start(port: Int, enableAudio: Boolean): SenderDisplay {
         val socket = own(connect(port)).apply { soTimeout = 15000; tcpNoDelay = true }
         val wire = own(RtspWire(socket, events::diagnostic)); control = wire
-        val pairing = PhonePairing(identity, { path, body -> wire.request("POST", path, body, pairingHeaders).body }, savePair)
+        /*
+         * `X-Apple-PD: 1` on pair-verify only.
+         *
+         * 对照实现's pairing helper (`Q0.b`) builds its header list as:
+         *
+         *     headers.add("X-Apple-HKP", "2")
+         *     if (path == "pair-verify") headers.add("X-Apple-PD", "1")
+         *
+         * `X-Apple-PD` means "this side is the device" — it is how a sender
+         * tells the receiver which half of the pair it is claiming. It applies
+         * to pair-verify only; pair-setup does not carry it.
+         *
+         * The HKP version is deliberately left at 3 here. 对照实现 sends 2,
+         * but the version negotiates which pairing exchange runs (2 is the
+         * short-lived legacy form, 3 is the SRP/nonce form this sender already
+         * completes successfully against this car), so changing it is a
+         * separate experiment, not a header-only change.
+         */
+        fun pairingHeadersFor(path: String): Map<String, String> =
+            if (path == "pair-verify") pairingHeaders + ("X-Apple-PD" to "1") else pairingHeaders
+        val pairing = PhonePairing(
+            identity,
+            { path, body -> wire.request("POST", path, body, pairingHeadersFor(path)).body },
+            savePair,
+        )
         legacyAuthentication?.invoke(wire)
         // This receiver authenticates the accessory with MFiSAP but still runs
         // standard pair-setup/pair-verify: its event channel and every
@@ -1428,6 +1456,11 @@ class AirPlaySender(
         // wrong salt on receivers that allocate the id themselves.
         val responseId = accepted["streamConnectionID"] ?: id
         val responseSeed = unsignedPlistDecimal(responseId) ?: id.toString()
+        // Remember the id the receiver assigned. Its /feedback entries carry the
+        // same value under `streamConnectionID`, and that is the only way to tell
+        // our media stream's playout position from an auxiliary stream's when the
+        // car reports several at once.
+        (responseId as? Number)?.toLong()?.let { audioStreamConnectionId = it }
         audioKey = AirPlayCrypto.hkdfSha512(
             shared,
             "DataStream-Salt$responseSeed".toByteArray(),
@@ -1865,7 +1898,31 @@ class AirPlaySender(
         streams.forEach { raw ->
             val entry = raw as? Map<*, *> ?: return@forEach
             val sampleTime = (entry["sampleTime"] as? Number)?.toLong() ?: return@forEach
+            /*
+             * Match by stream type first, then by connection id.
+             *
+             * 对照实现 parses three fields per entry —
+             * `streamConnectionID`, `sampleTime`, `timestampRawNs` — and this
+             * receiver can report several streams at once (the iPhone capture
+             * shows Main and Alt entries in one feedback dictionary). Taking
+             * whichever entry came first meant an Alt-stream reply could be read
+             * as the media stream's playout position, which makes the progress
+             * line — the only evidence that the car is actually consuming audio
+             * — report a number from a different stream.
+             *
+             * `type` is checked when the entry carries it; a missing type is
+             * treated as ours rather than dropped, because older firmware omits
+             * it and losing the only progress signal is worse than an occasional
+             * mis-attribution.
+             */
+            val type = (entry["type"] as? Number)?.toInt()
+            if (type != null && type != ours) return@forEach
+            val connectionId = (entry["streamConnectionID"] as? Number)?.toLong()
+            if (connectionId != null && audioStreamConnectionId != 0L && connectionId != audioStreamConnectionId) {
+                return@forEach
+            }
             receiverAudioSampleTime = sampleTime
+            (entry["timestampRawNs"] as? Number)?.toLong()?.let { receiverFeedbackNanos = it }
             receiverFeedbackCount++
         }
         if (reportedCommands.add("feedback:${streams.size}")) {
