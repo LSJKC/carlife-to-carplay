@@ -43,9 +43,9 @@ android {
         // every build installed as 1.0.0 and an update over an existing install
         // looked like the same version to the package manager — which is what
         // made installing over an older build fail.
-        versionCode = 310
-        versionName = "1.3.10"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.10-310-align-with-cpp-sender\"")
+        versionCode = 311
+        versionName = "1.3.11"
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.11-311-screen-setup-align\"")
     }
 
     buildFeatures { buildConfig = true }

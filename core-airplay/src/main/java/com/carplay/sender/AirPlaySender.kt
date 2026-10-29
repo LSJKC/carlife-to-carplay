@@ -707,19 +707,31 @@ class AirPlaySender(
         synchronized(iapLock) { openingIap = true }
         val seed = SecureRandom().nextLong().and(Long.MAX_VALUE)
         /*
-         * No type-130 SETUP. The reference sender never sends one here, and
-         * says why in its own trace:
+         * No type-130 SETUP — and now that is a measured fact, not a guess.
          *
-         *   Runtime type130 skipped: vendor compatibility profile; SETUP
-         *   rejects types outside 100..111 and may tear down session
+         * 对照实现 0.3.19 does have the code for it (`C0281k1.F(byte[])`
+         * builds `{type:130, clientTypeUUID, seed, streamConnectionID}`), but
+         * that method opens with a guard:
          *
-         * This car answers our 130 with a 200 and an empty body, which looks
-         * like acceptance but is not: measured from RECORD, the control
-         * connection is destroyed 13.09-13.16 s later in every single capture.
-         * The reference sender, which skips 130 entirely, keeps the same
-         * session alive for 110 s.
+         *     if (M()) { log("TUNNEL: disabled before SETUP type=130; profile=…");
+         *                return null; }
          *
-         * Its SETUP sequence on this car is exactly one screen stream:
+         * and `M()` compares the *car's* `sourceVersion` against W5.e="450.14":
+         *
+         *     if (!carSourceVersion.equals("450.14") && !isUuid(macAddress)
+         *         && !ownSourceVersion.equals("450.14") && !isUuid(mac)) return false;
+         *     return true;
+         *
+         * This head unit declares `sourceVersion="450.14"` (1.3.7 field log,
+         * `车机协议版本声明：sourceVersion="450.14"`), so `M()` is true and the
+         * 130 is never sent on this car. That is why the sender observed staying
+         * connected for 110 s has no type-130 stream on the wire.
+         *
+         * Our own 130 attempts were answered with a 200 and an empty body, which
+         * looks like acceptance but is not: measured from RECORD, the control
+         * connection was destroyed 13.09-13.16 s later in every capture.
+         *
+         * SETUP on this car is exactly one screen stream:
          *
          *   SETUP streams=[{type:110, ...}]  (+ optional 101/100 audio later)
          *
@@ -838,15 +850,23 @@ class AirPlaySender(
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
         /*
-         * Screen SETUP shape: latencyMs, uuid, displayWidth/displayHeight.
+         * Screen SETUP shape — 对照实现's, recovered from 0.3.19.
          *
-         * displayWidth/displayHeight were removed in 1.2.75 to match the
-         * reference sender's four-key body, then put back here: that change had
-         * no on-car verification behind it, and 1.2.75 also changed the iAP2
-         * bootstrap at the same time, so a regression could not be attributed
-         * to either one. Both keys were present in every build that produced a
-         * picture on this car. Removing them is a separate experiment, to be
-         * run alone once the session is known to survive.
+         * Its `C0281k1` line 2045 builds exactly four keys:
+         *
+         *     { type:110, streamConnectionID, uuid, latencyMs:25 }
+         *
+         * This sender had six: the same four plus `displayWidth` and
+         * `displayHeight`, and `latencyMs` 75 instead of 25. The size keys were
+         * removed in 1.2.75 to match the four-key shape, then put back because
+         * that build also reworked the iAP2 bootstrap and a regression could not
+         * be attributed to either change. The attribution problem is gone now:
+         * only the SETUP body changes here, and the reference is a sender that
+         * stays connected on this exact car.
+         *
+         * 25 ms is deliberate on 对照实现's part — it is not "one frame at
+         * 30 fps" (that is 33 ms), it is the same scheduling lead its audio path
+         * uses, expressed for a stream that has no separate audioLatencyMs key.
          *
          * The key is `uuid`, not `displayUUID` — the latter is the shape a
          * different Delphi firmware uses, and sending it here left the car
@@ -856,8 +876,6 @@ class AirPlaySender(
             "type" to 110,
             "streamConnectionID" to connection,
             "latencyMs" to SCREEN_LATENCY_MS,
-            "displayWidth" to selected.width,
-            "displayHeight" to selected.height,
         )
         selected.uuid?.let { stream["uuid"] = it }
         val reply = streams(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(stream))), plistHeaders).body)
@@ -2472,15 +2490,17 @@ class AirPlaySender(
         private const val AUDIO_PROFILE_STABLE_WINDOW_MS = 20_000L
 
         /**
-         * Scheduling lead for the screen stream.
+         * Scheduling lead for the screen stream — 对照实现's value.
          *
-         * 75 ms is what every build that produced a picture on this car used.
-         * 1.2.75 raised it to 100 to match the reference sender's SETUP, then
-         * this reverted: the two values differ by one frame at 30 fps, and the
-         * change rode along with the iAP2 bootstrap rework, so a regression
-         * would not have been attributable. Worth trying on its own later.
+         * Its screen SETUP (`C0281k1` line 2045) declares `latencyMs: 25`, and
+         * that sender is the one observed holding this head unit open. Every
+         * build here used 75 instead, carried over from an unrelated reference;
+         * 1.2.75 briefly moved it to 100 and reverted for lack of attribution.
+         *
+         * 25 is not a frame interval at 30 fps (that would be 33) — it is a
+         * fixed scheduling lead, the same number its audio path uses.
          */
-        private const val SCREEN_LATENCY_MS = 75
+        private const val SCREEN_LATENCY_MS = 25
 
         private val CONTROLLER_FEATURES = listOf(
             "uiContext",
