@@ -1,5 +1,10 @@
 # CarLink Cast
 
+[![Latest release](https://img.shields.io/github/v/release/LSJKC/carlife-to-carplay?label=release&sort=semver)](https://github.com/LSJKC/carlife-to-carplay/releases/latest)
+[![License](https://img.shields.io/github/license/LSJKC/carlife-to-carplay)](LICENSE)
+[![Platform](https://img.shields.io/badge/Android-10%2B-3ddc84)](https://developer.android.com)
+[![Language](https://img.shields.io/badge/Kotlin-%E2%9C%93-7f52ff)](https://kotlinlang.org)
+
 让一台普通 Android 手机冒充 iPhone，把手机上的 **CarLife** 画面投到只支持 **CarPlay** 的车机上。
 
 不需要越狱，不需要 MFi 认证硬件，不需要转接盒。
@@ -7,6 +12,21 @@
 > **非官方项目。** 与 Apple Inc.、百度、荣耀及任何汽车制造商均无关联，未获授权，
 > 不是 MFi 产品。CarPlay / AirPlay / CarLife 均为其各自权利人的商标。
 > 仅限停车时配置与调试；行驶中的导航请以原厂系统为准。
+
+---
+
+## 下载
+
+| 版本 | 说明 |
+|---|---|
+| **[最新版](https://github.com/LSJKC/carlife-to-carplay/releases/latest)** | 推荐。当前 1.3.17 |
+| [全部版本](https://github.com/LSJKC/carlife-to-carplay/releases) | 1.3.0 起逐版 APK |
+| [CHANGELOG](CHANGELOG.md) | 每个版本改了什么、为什么改 |
+
+> ⚠️ **1.3.9 到 1.3.16 有一个会直接导致连不上的问题**，已在 1.3.17 修复。
+> 如果装了这一段里的版本，请直接升到最新。
+
+监测应用（独立 APK，用于排查「断连时谁先断开」）需要自行编译 `monitor` 模块。
 
 ---
 
@@ -38,6 +58,17 @@ CarLife。两边各有一套完整实现，中间却不通。
 ```
 
 两边都用最成熟的实现，中间只做「冒充 iPhone」这一件事。
+
+---
+
+## 使用前提
+
+1. **手机装有 CarLife**（荣耀机型为 `com.baidu.carlife.honor`，荣耀车联提供车机桌面）
+2. **车机支持无线 CarPlay**
+3. 手机与车机**已通过系统蓝牙配对**
+4. Android 10 及以上
+
+首次连接需要在车机上确认配对。之后打开应用、点连接即可。
 
 ---
 
@@ -122,6 +153,40 @@ echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
 `monitor` 是独立 APK（包名 `com.carlink.monitor`），不依赖主应用，主应用崩溃时
 它仍在采样。
+
+### 目录
+
+```
+carlink-cast/
+├── app/                     应用外壳
+│   └── src/main/java/com/carlink/cast/
+│       ├── CastService.kt         前台服务，会话生命周期
+│       ├── CastEngine.kt          一次投屏的编排
+│       ├── AirPlayLink.kt         AirPlay 会话 + iAP2 控制通道
+│       ├── BluetoothBootstrap.kt  蓝牙 iAP2 引导
+│       ├── CarLifePanelCompositor.kt  全画布合成 + 二次编码
+│       ├── MirrorSource.kt        屏幕镜像来源（另一条路径）
+│       ├── NowPlayingPublisher.kt 媒体信息（0x5001）
+│       ├── Iap2HidDispatcher.kt   车机 HID → CarLife
+│       └── ui/                    协议内容视图、阶段环、指标
+├── core-airplay/            AirPlay 发送端
+│   └── sender/
+│       ├── AirPlaySender.kt       主会话：SETUP、RECORD、视频与音频
+│       ├── SenderNegotiation.kt   能力协商与音频候选
+│       ├── VideoPackets.kt        128 字节头的封包格式
+│       ├── SessionModes.kt        资源归属状态机
+│       └── RtspWire.kt            RTSP 收发与加密
+├── core-iap2/               iAP2 协议
+│   ├── transport/                 链路层：CSM 分帧、重传、检测包
+│   ├── session/                   会话与命令分发
+│   └── controller/                身份认证、无线配置
+├── adapter-carlife/         CarLife 适配
+│   ├── CarLifeProtocol.kt         消息 id 与编解码
+│   ├── CarLifeSession.kt          七个端口的会话
+│   ├── CarLifeEncoderFormat.kt    98386/98311 编码器协商
+│   └── CarLifeProjectionAdapter.kt 对外接口
+└── monitor/                 独立监测应用
+```
 
 ---
 
