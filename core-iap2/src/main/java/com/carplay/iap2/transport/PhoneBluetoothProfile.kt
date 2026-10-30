@@ -90,7 +90,17 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
              * produced the 12.9 s teardown fixed in 1.2.80, and the two
              * transports demonstrably want opposite behavior.
              */
+            /*
+             * The command channel also advances its sequence on pure ACKs.
+             *
+             * Both facts come from the same trace and both were wrong here for
+             * the same reason — the Bluetooth behaviour had been generalised to
+             * every transport. On this car the Wi-Fi command link answers
+             * nothing at the CSM layer, and it is the only place these two
+             * settings differ from Bluetooth.
+             */
             ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL,
+            advanceSequenceOnAcknowledgement = this == COMMAND_TUNNEL,
             maximumInFlightPackets = 1,
         )
     }

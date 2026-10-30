@@ -130,6 +130,9 @@ class Iap2LinkEngine(
     private var peerSynchronizationSequence: Int? = null
     private var controlSessionId = CONTROL_SESSION_ID
     private var sentSequence = INITIAL_SEQUENCE
+    /** See [sendAcknowledgement]: per-transport sequence rule. */
+    private val advanceSequenceOnAcknowledgement =
+        config.advanceSequenceOnAcknowledgement
     private var lastSentAcknowledged: Int? = null
     private var lastReceivedInOrder = 0
     private var lastAcknowledgedReceived: Int? = null
@@ -781,11 +784,32 @@ class Iap2LinkEngine(
     }
 
     private fun sendAcknowledgement() {
-        // Pure ACK repeats the last sent sequence. Only a data packet advances it.
+        /*
+         * Whether a pure ACK consumes a sequence number is a per-transport
+         * decision on this car.
+         *
+         * The Bluetooth link keeps repeating the last sent sequence: that is
+         * what a real iPhone does over RFCOMM, and the handshake test
+         * `hardwareTraceSequencePatternKeepsAckAt99AndIdentificationAt100`
+         * pins it from an actual capture.
+         *
+         * The Wi-Fi command channel is the other way round. The reference
+         * sender's trace there shows acknowledgements sharing one increasing
+         * sequence space with its data packets:
+         *
+         *     data  seq=100 101 102 103 104 105
+         *     ack   seq=100 102 103 104 109 109
+         *
+         * …and it is the only transport where we have never received a single
+         * CSM: no 0x1D01 in reply to 0x1D00, in every session, on every video
+         * source. Repeating 99 forever is the one thing that differs there.
+         */
+        if (advanceSequenceOnAcknowledgement) sentSequence = nextSequence(sentSequence)
         writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
     }
 
     private fun sendExtendedAcknowledgement(missing: List<Int>) {
+        if (advanceSequenceOnAcknowledgement) sentSequence = nextSequence(sentSequence)
         writePacket(missing.map { it.toByte() }.toByteArray(), sentSequence, CONTROL_EXTENDED_ACKNOWLEDGEMENT, 0)
     }
 
@@ -1007,6 +1031,15 @@ data class Iap2LinkConfig(
      * only the explicitly selected Wi-Fi command profile enables this.
      */
     val ignoreRepeatedDetectionMarker: Boolean = false,
+    /**
+     * Whether a pure ACK consumes a sequence number.
+     *
+     * False on Bluetooth (the iPhone repeats its last sequence there and a
+     * captured handshake pins it), true on the Wi-Fi command channel
+     * (the reference sender advances there and that link has never once
+     * produced a CSM).
+     */
+    val advanceSequenceOnAcknowledgement: Boolean = false,
     /** Optional phone send limit; never replaces the peer's negotiated synchronization fields. */
     val maximumInFlightPackets: Int? = null,
     /**
