@@ -1376,7 +1376,7 @@ class MainActivity : AppCompatActivity() {
          *
          * The picker is the flexible path but it needs the driver to already
          * own a 1972×520 image; almost nobody does, so the feature looked
-         * broken. These are the same nine images 对照实现 ships, cropped to
+         * broken. These are the same nine images an established sender ships, cropped to
          * the panel by [BuiltInWallpapers] instead of by the user.
          */
         content.addView(secondaryButton(getString(R.string.wallpaper_builtin)).apply {

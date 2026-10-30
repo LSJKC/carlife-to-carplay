@@ -164,7 +164,7 @@ class CastService : Service() {
             // for the panel size instead of the safe rectangle (see
             // CarLifeSession's `passthrough`), so its stream already carries the
             // canvas the car declared and can be forwarded untouched — the shape
-            // a-sender uses on this same Honor CarLife build. The trade is the
+            // an established sender uses on this same Honor CarLife build. The trade is the
             // wallpaper the compositor paints outside the safe area.
             val passthrough = settings.videoPassthrough
             carLife.passthroughVideo = passthrough

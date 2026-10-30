@@ -524,7 +524,7 @@ class Iap2LinkEngine(
 
     /**
      * Tears the current link down and negotiates a fresh one, keeping the
-     * transport open. Mirrors the reference sender's `link-restart`.
+     * transport open. Mirrors the `link-restart`.
      *
      * Everything negotiated on the old link is invalid: the control session
      * id, the peer limits, the retransmission state, the queued and
@@ -580,7 +580,7 @@ class Iap2LinkEngine(
          * A peer SYN while the link is already up starts a NEW link.
          *
          * The old `if (state != State.NEGOTIATING) return` dropped it silently.
-         * The reference sender does the opposite and says so in its trace:
+         * an established sender does the opposite and says so in its trace:
          *
          *     +7531ms RX link flags=0x80 seq=73 ack=0 session=0 bytes=16
          *     +7532ms link-restart epoch=1; authentication-and-readiness-cleared
@@ -1036,7 +1036,7 @@ data class Iap2LinkConfig(
      *
      * False on Bluetooth (the iPhone repeats its last sequence there and a
      * captured handshake pins it), true on the Wi-Fi command channel
-     * (the reference sender advances there and that link has never once
+     * (an established sender advances there and that link has never once
      * produced a CSM).
      */
     val advanceSequenceOnAcknowledgement: Boolean = false,
@@ -1047,7 +1047,7 @@ data class Iap2LinkConfig(
      *
      * The link layer can only clear its own queues; the iAP2 session above it
      * (authentication, identification, the CSM handlers) still believes it is
-     * ready and will never speak again on the new link. The reference sender
+     * ready and will never speak again on the new link. an established sender
      * replays the whole bootstrap after a restart, so the owner has to be told.
      */
     val onLinkRestart: (() -> Unit)? = null,

@@ -499,7 +499,7 @@ internal class AirPlayLink(
         /**
          * Moves the control session from Bluetooth to Wi-Fi, once AirPlay is up.
          *
-         * The reference sender's post-RECORD trace does this in two steps and
+         * the post-RECORD trace does this in two steps and
          * ends with the RFCOMM gone while the Android Bluetooth pairing — and
          * therefore A2DP and HFP — stays:
          *
@@ -660,8 +660,8 @@ internal class AirPlayLink(
                              *
                              * This used to rotate 0xAA06 / 0xAA00 / 0x1D00 every
                              * 800 ms on the theory that one of them would be the
-                             * message this firmware answered. 对照实现's own
-                             * state machine, recovered from 0.3.19
+                             * message this firmware answered. the own
+                             * state machine
                              * (`C0003a1.b()`, dispatched on the car's message id),
                              * shows that is the wrong shape:
                              *
@@ -737,7 +737,7 @@ internal class AirPlayLink(
                         /*
                          * The car restarted its iAP2 link.
                          *
-                         * The 对照实现 sender states the rule this car
+                         * An established sender states the rule this car
                          * actually wants (`V0`):
                          *
                          *   "IAPLINK: 网络认证及状态 ACK 就绪；不重发 RECORD、
@@ -762,8 +762,8 @@ internal class AirPlayLink(
                              * A link restart resets the exchange and re-arms
                              * exactly one opening message.
                              *
-                             * 对照实现 says this in its own words (`V0`,
-                             * recovered from 0.3.19):
+                             * the observation reads (`V0`,
+                             * ):
                              *
                              *   "IAPLINK: 网络认证及状态 ACK 就绪；不重发 RECORD、
                              *    不改变屏幕归属"

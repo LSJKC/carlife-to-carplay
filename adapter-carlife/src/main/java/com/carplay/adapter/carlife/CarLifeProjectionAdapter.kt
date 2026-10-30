@@ -96,7 +96,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * (`sink(VideoPackets.lengthPrefixed(frame.data), …)`). This flag selects
      * that branch deliberately instead of only using it as a fallback.
      *
-     * a-sender — the other Android-CarPlay-sender project, and the one whose
+     * Another Android CarPlay sender, and the one whose
      * author runs the same Honor CarLife build this app targets — forwards
      * untouched H.264 and nothing else. Its README is explicit that the
      * passthrough is the design: it hijacks CarLife's encoder output and
@@ -536,7 +536,7 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
          *     16721 画面已发送到车机                            (+6.7 s)
          *     23089 Connection reset                            (+13.0 s)
          *
-         * A working sender has the source already producing when the car
+         * An established sender has the source already producing when the car
          * activates: the iPhone's own EndpointRECORDTimeMs is 17 ms, and its
          * TotalSETUP is 289 ms. Nothing about the protocol needs seconds — all
          * of ours were spent waiting on a process this code had just killed.
@@ -1274,9 +1274,9 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
          *     Intent("com.hihonor.auto.ACTION_HARD_KRY_CLICK")
          *       .putExtra("mediaKeyCodeExtra", 8101/8102/8109/8110)
          *
-         * which `CardHostManager` and `caraudio.a` listen for. The
-         * reference sender's trace shows exactly those arriving at its
-         * listener (`key name=暂停 code=8110`, `key name=播放 code=8109`).
+         * which `CardHostManager` and `caraudio.a` listen for. The media
+         * listener sees exactly those keys arrive:
+         * `key name=暂停 code=8110`, `key name=播放 code=8109`.
          *
          * The broadcast goes to HONOR's package, not CarLife's: CarLife has no
          * receiver for it, and Honor owns `CardHostManager`/`caraudio.a`. When

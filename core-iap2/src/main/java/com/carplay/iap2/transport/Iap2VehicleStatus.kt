@@ -31,7 +31,7 @@ enum class EvChargingConnectors(internal vararg val wireValues: Int) {
 
 /**
  * The identification to send: an electric vehicle is declared only while [provider] has a battery
- * reading, so the iPhone is never told about an EV that 显示客户端 cannot report (adb off or not
+ * reading, so the iPhone is never told about an EV that a display client cannot report (adb off or not
  * approved, or a car without these properties). Reads the provider's cached value; never blocks.
  */
 fun Iap2IdentificationConfig.withVehicleStatusFrom(provider: VehicleStatusProvider?): Iap2IdentificationConfig =

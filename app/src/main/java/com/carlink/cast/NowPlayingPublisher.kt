@@ -174,7 +174,7 @@ internal class NowPlayingPublisher(
             if (request.playback.isNotEmpty()) {
                 group(1) {
                     /*
-                     * Field ids below 12 are from the 对照实现 sender's
+                     * Field ids below 12 are from an established sender's
                      * NowPlaying encoder (`Tg.b()`), which is the one this car
                      * answers to:
                      *

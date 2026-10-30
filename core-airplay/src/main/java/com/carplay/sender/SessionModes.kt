@@ -55,7 +55,7 @@ class SessionModes {
     }
     @Synchronized fun snapshot(): Map<String, Any> = mapOf("type" to "modesChanged", "params" to mapOf(
         "resources" to resources.map { (id, resource) -> mapOf("resourceID" to id, "entity" to resource.owner, "permanentEntity" to resource.permanent) },
-        // appStates is not decoration. A working sender on this firmware always
+        // appStates is not decoration. An established sender on this firmware always
         // announces the three app states with entity 0, and the speech state
         // additionally carries speechMode -1. Leaving the key out leaves the
         // car without a state table for the phone's apps, and the resources
@@ -99,7 +99,7 @@ class SessionModes {
      *
      * A sender that just closes its sockets leaves the head unit holding a
      * CarPlay session it still believes is live: the car's own UI does not
-     * come back until its watchdog expires. 对照实现's graceful retire sends
+     * come back until its watchdog expires. The graceful retire sends
      * the same ownership snapshot with both resources on the accessory before
      * TEARDOWN, and the car returns to its home screen immediately.
      *

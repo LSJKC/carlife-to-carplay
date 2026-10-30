@@ -108,7 +108,7 @@ internal class CarLifeSession(
      * also what forces a decode + re-encode round trip.
      *
      * Passthrough instead asks CarLife for the panel size itself and forwards
-     * the encoder output as-is, exactly the way a-sender does on the same
+     * the encoder output as-is, exactly the way an established sender does on the same
      * Honor CarLife build. The cost is the wallpaper; the gain is that there is
      * no second MediaCodec and no re-encode in the path.
      *

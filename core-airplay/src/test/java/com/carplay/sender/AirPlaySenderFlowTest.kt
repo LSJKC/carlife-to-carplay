@@ -293,7 +293,7 @@ class AirPlaySenderFlowTest {
                         displays.incrementAndGet()
                         car.milestones += "prepare"
                         // The screen SETUP no longer carries displayWidth/displayHeight
-                        // — 对照实现's four-key body is {type, streamConnectionID,
+                        // — the four-key body is {type, streamConnectionID,
                         // uuid, latencyMs} — so the negotiated size is captured here,
                         // from the one callback that receives it directly.
                         car.videoSetupDimensions.complete(display.width to display.height)
@@ -512,7 +512,7 @@ class AirPlaySenderFlowTest {
                                         check(if (mode == ControlMode.DEDICATED) authenticated.get(5,TimeUnit.SECONDS) else bluetoothAuthenticated.get())
                                         mediaStarted.set(true)
                                         milestones += "screenSetup"
-                                        // The SETUP body is 对照实现's four keys, so the
+                                        // The SETUP body is the four keys, so the
                                         // size comes from the display callback rather than
                                         // from the request. Assert the body really is that
                                         // shape — this is the only place the fixture sees it.

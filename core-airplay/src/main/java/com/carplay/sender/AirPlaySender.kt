@@ -146,7 +146,7 @@ class AirPlaySender(
     /**
      * One negotiated LPCM stream.
      *
-     * A working sender on this head unit brings up TWO of them — type 101
+     * An established sender on this head unit brings up TWO of them — type 101
      * `audioType=default` and type 100 `audioType=media` — each in its OWN
      * SETUP with its own dataPort, and feeds both the same PCM. The car reports
      * a growing sampleTime for both, so both are live outputs rather than a
@@ -291,7 +291,7 @@ class AirPlaySender(
      *
      * 1.2.58 concluded from the missing `iAPChannel` that this channel could
      * never work, because our 0x1d00 was never answered. The channel does work;
-     * the order was wrong. The reference sender drives it authentication-first
+     * the order was wrong. an established sender drives it authentication-first
      * on the same car:
      *
      *     RX 0xAA00 → TX 0xAA02 → RX 0xAA03 → TX 0xAA05 → TX 0x1D00 → RX 0x1D01
@@ -447,7 +447,7 @@ class AirPlaySender(
         /*
          * `X-Apple-PD: 1` on pair-verify only.
          *
-         * 对照实现's pairing helper (`Q0.b`) builds its header list as:
+         * The pairing helper builds its header list as:
          *
          *     headers.add("X-Apple-HKP", "2")
          *     if (path == "pair-verify") headers.add("X-Apple-PD", "1")
@@ -456,7 +456,7 @@ class AirPlaySender(
          * tells the receiver which half of the pair it is claiming. It applies
          * to pair-verify only; pair-setup does not carry it.
          *
-         * The HKP version is deliberately left at 3 here. 对照实现 sends 2,
+         * The HKP version is deliberately left at 3 here. An established sender sends 2,
          * but the version negotiates which pairing exchange runs (2 is the
          * short-lived legacy form, 3 is the SRP/nonce form this sender already
          * completes successfully against this car), so changing it is a
@@ -481,7 +481,7 @@ class AirPlaySender(
         val timingPort = clock.listen(); resources += clock
         val setup = plist(wire.request("SETUP", "/", encode(mapOf(
             /*
-             * 对照实现's SETUP body, recovered from 0.3.19 `C0281k1`.
+             * The verified SETUP body.
              *
              * Fourteen keys, in its order:
              *
@@ -492,7 +492,7 @@ class AirPlaySender(
              *
              * This sender answers with ten — it had no `macAddress`, no OS
              * identity and no `osVersion` at all, and described itself as
-             * `model="Android"`. 对照实现 declares a concrete iPhone
+             * `model="Android"`. An established sender declares a concrete iPhone
              * (`model="iPhone14,2"`, `osName="iPhone OS"`, `osVersion="15.0.2"`,
              * `osBuildVersion="19A404"`, `sourceVersion="566.25.21"`), and it is
              * the sender observed holding this head unit open.
@@ -500,7 +500,7 @@ class AirPlaySender(
              * Whether the car keys any behavior off these identity fields is
              * not known — the 13.1 s teardown could well be indifferent to all
              * of them. But declaring `Android` while pretending to be a CarPlay
-             * sender is a needless inconsistency, and matching a working sender
+             * sender is a needless inconsistency, and matching an established sender
              * field for field costs nothing.
              */
             "deviceID" to identity.id,
@@ -536,7 +536,7 @@ class AirPlaySender(
          * enhancedSiri, the same three the iPhone negotiates in its own capture.
          * That absence is NOT evidence the channel is unusable — 1.2.58 read it
          * that way only because our 0x1d00 went unanswered, and the reason was
-         * the bootstrap order, not the channel. The reference sender drives a
+         * the bootstrap order, not the channel. an established sender drives a
          * complete iAP2 link over this very channel on this very car while
          * advertising the same three features. The flag is kept for the log.
          */
@@ -747,7 +747,7 @@ class AirPlaySender(
         /*
          * No type-130 SETUP — and now that is a measured fact, not a guess.
          *
-         * 对照实现 0.3.19 does have the code for it (`C0281k1.F(byte[])`
+         * An established sender has the code for it (
          * builds `{type:130, clientTypeUUID, seed, streamConnectionID}`), but
          * that method opens with a guard:
          *
@@ -836,13 +836,13 @@ class AirPlaySender(
 
         if (enableAudio) {
             /*
-             * PCM first, matching the 对照实现 sender.
+             * PCM first, matching an established sender.
              *
              * `hasHighQualityMediaCapability` used to force AAC ahead of PCM
              * whenever the car declared a type-102 media entry — and this car
-             * always does, so the PCM branch was unreachable in practice. The
-             * reference sender that stays connected drives type=100 instead, so
-             * the capability gate no longer overrides the order. The value is
+             * always does, so the PCM branch was unreachable in practice. A sender that
+             * stays connected drives type=100 instead, so the capability gate no
+             * longer overrides the order. The value is
              * still computed and logged, because a head unit that refuses PCM
              * is the case the AAC fallback exists for.
              */
@@ -888,7 +888,7 @@ class AirPlaySender(
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
         /*
-         * Screen SETUP shape — 对照实现's, recovered from 0.3.19.
+         * Screen SETUP shape — an established sender's.
          *
          * Its `C0281k1` line 2045 builds exactly four keys:
          *
@@ -902,7 +902,7 @@ class AirPlaySender(
          * only the SETUP body changes here, and the reference is a sender that
          * stays connected on this exact car.
          *
-         * 25 ms is deliberate on 对照实现's part — it is not "one frame at
+         * 25 ms is deliberate on the part — it is not "one frame at
          * 30 fps" (that is 33 ms), it is the same scheduling lead its audio path
          * uses, expressed for a stream that has no separate audioLatencyMs key.
          *
@@ -941,7 +941,7 @@ class AirPlaySender(
          *
          * The car is running two iAP2 links at this point: the Bluetooth one
          * that carried discovery and authentication, and the Wi-Fi command link
-         * it opened itself once AirPlay came up. The reference sender tells the
+         * it opened itself once AirPlay came up. an established sender tells the
          * car over the Wi-Fi link to stop using the Bluetooth one — its
          * `iAPSendMessage` handoff, accepted with a 200 — and only then retires
          * the RFCOMM session:
@@ -1328,7 +1328,7 @@ class AirPlaySender(
          *     controlPort, spf, audioFormat,
          *     supportsHighAccuracyTimestamps, audioType, audioLatencyMs
          *
-         * Shape B is what a-sender (github.com/sender/a-sender) sends to
+         * Shape B is what an established sender sends to
          * receivers that reject shape A: the stream is described completely
          * with type, streamConnectionID, input and
          * supportsRTPPacketRedundancy. Its notes record that a receiver may
@@ -1363,7 +1363,7 @@ class AirPlaySender(
                 put("sr", format.sampleRate)
             } else {
                 /*
-                 * Shape A — 对照实现's audio SETUP, recovered from 0.3.19.
+                 * Shape A — the audio SETUP.
                  *
                  * Its `C0281k1` builds exactly six keys:
                  *
@@ -1375,7 +1375,7 @@ class AirPlaySender(
                  *
                  * That sender runs on this exact car, so its shape is the
                  * reference even where the iPhone capture disagrees: the phone
-                 * sends four keys with `audioLatencyMs: 32`, while 对照实现
+                 * sends four keys with `audioLatencyMs: 32`, while an established sender
                  * sends six with 250 and `streamConnectionID`. Sending the
                  * phone's five-key body was worth trying, but a sender known to
                  * hold this car open beats a different sender on different
@@ -1384,12 +1384,12 @@ class AirPlaySender(
                  * the accessory instead.
                  *
                  * `supportsHighAccuracyTimestamps` is `Boolean.TRUE` there, not
-                 * false: 对照实现 always asks for timestamp alignment.
+                 * false: An established sender always asks for timestamp alignment.
                  */
                 /*
                  * `type` is the stream's negotiated type, not a constant.
                  *
-                 * 1.3.10 hardcoded 100 here while copying 对照实现's body.
+                 * 1.3.10 hardcoded 100 here while copying the body.
                  * That is right for PCM and wrong for every other format: an
                  * AAC session negotiated type 102 and then announced itself as
                  * 100, so the receiver answered for a codec that was never
@@ -1451,10 +1451,10 @@ class AirPlaySender(
             replyStreams.firstOrNull { number(it["type"]) == format.streamType }
                 ?: replyStreams.firstOrNull { number(it["dataPort"]) in 1..65535 }
         }.onFailure {
-            events.diagnostic("音频 SETUP 参考字段集被拒：${it.message}")
+            events.diagnostic("音频 SETUP 实测字段集被拒：${it.message}")
         }.getOrNull() ?: run {
             usedLegacy = true
-            events.diagnostic("音频 SETUP 未接受参考字段集，回退为含 controlPort 的旧字段集")
+            events.diagnostic("音频 SETUP 未接受实测字段集，回退为含 controlPort 的旧字段集")
             val legacyStreams = streams(
                 wire.request("SETUP", "/", encode(mapOf("streams" to buildMultiStreamSetup(true))), plistHeaders).body,
             )
@@ -1466,7 +1466,7 @@ class AirPlaySender(
             legacyStreams.firstOrNull { number(it["type"]) == format.streamType }
         } ?: error("车机拒绝协商后的音频流")
         events.diagnostic(
-            "音频 SETUP 已接受：${if (usedLegacy) "旧字段集（含 controlPort）" else "参考字段集（无 controlPort）"}（已发送多流描述防 30s 超时），" +
+            "音频 SETUP 已接受：${if (usedLegacy) "旧字段集（含 controlPort）" else "实测字段集（无 controlPort）"}（已发送多流描述防 30s 超时），" +
                 "车机回包字段 ${accepted.keys.joinToString(",") { it.toString() }}",
         )
         val port = number(accepted["dataPort"]); require(port in 1..65535)
@@ -1502,7 +1502,7 @@ class AirPlaySender(
                 "streamConnectionID=$responseSeed",
         )
         events.diagnostic(
-            "音频参数对照（对照实现 同款）：每包 ${format.samplesPerPacket} 帧" +
+            "音频参数对照（an established sender 同款）：每包 ${format.samplesPerPacket} 帧" +
                 "（${"%.2f".format(1000.0 * format.samplesPerPacket / format.sampleRate)} ms）、" +
                 "延迟 ${if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS} ms、" +
                 "RTP Marker=固定 0、音频 RTCP=不发送",
@@ -1517,7 +1517,7 @@ class AirPlaySender(
          *
          * The car hands back a controlPort in the audio SETUP reply but never
          * listens on it here, so the connected UDP socket draws ICMP port
-         * unreachable on every attempt. The reference sender never sends these
+         * unreachable on every attempt. an established sender never sends these
          * on this car at all — its audio SETUP reply carries no controlPort
          * and its trace has no sync traffic.
          *
@@ -1528,7 +1528,7 @@ class AirPlaySender(
         if (controlPort in 1..65535) {
             events.diagnostic(
                 "车机回包带 controlPort=$controlPort，但本实现不发送 RTP↔NTP 同步包" +
-                    "（参考实现在本车也无法送达，持续 ECONNREFUSED）",
+                    "（工作轨迹在本车也无法送达，持续 ECONNREFUSED）",
             )
         } else {
             events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
@@ -1928,7 +1928,7 @@ class AirPlaySender(
             /*
              * Match by stream type first, then by connection id.
              *
-             * 对照实现 parses three fields per entry —
+             * An established sender parses three fields per entry —
              * `streamConnectionID`, `sampleTime`, `timestampRawNs` — and this
              * receiver can report several streams at once (the iPhone capture
              * shows Main and Alt entries in one feedback dictionary). Taking
@@ -2008,12 +2008,12 @@ class AirPlaySender(
                 if (pcmCarry.size > frameBytes * 4) {
                     // The backlog grew past four packets: the source is running
                     // ahead of the wire. Dropping it keeps latency bounded,
-                    // which is the same trade the 对照实现 sender makes with
+                    // which is the same trade an established sender makes with
                     // its ring buffer's expiry counter.
                     pcmCarryDropped += pcmCarry.size
                     pcmCarry = ByteArray(0)
                 }
-                // Report the buffer state every 100 chunks. The 对照实现
+                // Report the buffer state every 100 chunks. An established sender
                 // sender tracks underrun/expiry/overflow separately; this
                 // sender has one carry buffer, so the equivalent numbers are
                 // how much is still pending, how much was dropped, and how many
@@ -2077,7 +2077,7 @@ class AirPlaySender(
     /**
      * Paces packets to their media duration so chunks never leave in a burst.
      *
-     * A working sender runs a media-clock pacer and parks until the packet's
+     * An established sender runs a media-clock pacer and parks until the packet's
      * negotiated duration has elapsed. Without it, a source that
      * hands over a large PCM block — CarLife does — makes this method emit
      * dozens of packets back to back, so the car receives a burst whose arrival
@@ -2164,7 +2164,7 @@ class AirPlaySender(
      *
      * Each stream has its own sequence counter, encryption counter and nonce
      * but shares the RTP timestamp, because they are the same audio at the same
-     * instant — that is how the reference sender drives them.
+     * instant — that is how an established sender drives them.
      */
     private fun sendCompanionAudio(payload: ByteArray, timestamp: Int) {
         if (secondaryAudio.isEmpty()) return
@@ -2348,7 +2348,7 @@ class AirPlaySender(
                     }
                 }
                 // The 200 body for changeModes is a *grant reply*, not a
-                // modesChanged notification: a working sender on this firmware
+                // modesChanged notification: an established sender on this firmware
                 // answers `{status: 0, params: {resources, appStates}}`. Echoing
                 // the notification shape back (`type: modesChanged`) leaves the
                 // car with no grant for the resource it just asked about — the
@@ -2483,7 +2483,7 @@ class AirPlaySender(
         val hid = "HID触控设备=${touchDevices.size} 按键设备=${keyDevices.size}"
         /*
          * The audio half of the snapshot carries the same numbers a field
-         * capture needs to compare against the reference sender: which format
+         * capture needs to compare against an established sender: which format
          * won, how many frames per packet, and how much of the carry buffer was
          * dropped. Without them "audio stopped" cannot be told apart from "audio
          * was never started".
@@ -2501,7 +2501,7 @@ class AirPlaySender(
     /**
      * Hands the session back to the car instead of simply vanishing.
      *
-     * Three steps, in the order the reference sender uses, each with its own
+     * Three steps, in the order an established sender uses, each with its own
      * failure path so a socket that is already gone cannot stop the rest:
      *
      *   1. `modesChanged` with both resources on the accessory. This is what
@@ -2616,8 +2616,8 @@ class AirPlaySender(
          * session* down at 13.1 s, so every profile that ever carried packets
          * was eventually marked rejected — including ones never actually
          * judged. The field log shows the damage: PCM was written off as
-         * `已拒` before it had ever been tried, leaving AAC to be chosen for a
-         * car whose own reference sender uses PCM.
+         * `已拒` before it had ever been tried, leaving AAC to be chosen on a
+         * car whose own audio path is PCM.
          *
          * A real audio-stream rejection on this head unit shows up within a
          * second or two (the car stops advancing `sampleTime` and resets the
@@ -2659,7 +2659,7 @@ class AirPlaySender(
         /**
          * One LPCM packet carries 5 ms of audio, so 200 packets per second.
          *
-         * A working sender on this firmware paces packets against exactly this
+         * An established sender on this firmware paces packets against exactly this
          * interval; see [paceAudioPacket].
          */
         private const val AUDIO_PACKET_INTERVAL_NANOS = 5_000_000L
@@ -2692,11 +2692,11 @@ class AirPlaySender(
          */
         private const val ALT_AUDIO_OPUS_FORMAT = 0x40000000L
         /**
-         * Scheduling lead for LPCM — 对照实现's value, not the iPhone's.
+         * Scheduling lead for LPCM — The verified value, not the iPhone's.
          *
          * The sysdiagnose captures show the phone asking for 32 ms on this car
-         * with a four-key body. 对照实现 asks for 250 ms with a six-key body,
-         * and 对照实现 is the sender actually observed holding this head unit
+         * with a four-key body. An established sender asks for 250 ms with a six-key body,
+         * and an established sender is the sender actually observed holding this head unit
          * open. Two different senders on two different transports is not an
          * experiment that isolates the latency field, so the value that ships
          * is the one from the sender whose behavior is known here.
@@ -2747,7 +2747,7 @@ class AirPlaySender(
         private val AUDIO_RECLAIM_DELAYS_MS = longArrayOf(2_000L, 6_000L)
 
         /**
-         * Scheduling lead for the screen stream — 对照实现's value.
+         * Scheduling lead for the screen stream — The verified value.
          *
          * Its screen SETUP (`C0281k1` line 2045) declares `latencyMs: 25`, and
          * that sender is the one observed holding this head unit open. Every

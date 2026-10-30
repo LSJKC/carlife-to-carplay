@@ -103,7 +103,7 @@ internal object CarLifeHardKey {
      *       .putExtra("dockKeyCodeExtra",  code)   // for the dock keys
      *
      * and both `CardHostManager` and `caraudio.a` listen for exactly that
-     * action with `mediaKeyCodeExtra`. The reference sender's trace shows the
+     * action with `mediaKeyCodeExtra`. an established sender shows the
      * same two codes arriving at its own listener:
      *
      *     key name=暂停 down=true code=8110 accepted=true

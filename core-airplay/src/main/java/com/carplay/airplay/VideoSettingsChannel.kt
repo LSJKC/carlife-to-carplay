@@ -33,7 +33,7 @@ class VideoSettingsChannel(
             bind(InetSocketAddress(bindAddress, 0))
         }
         server = bound
-        Thread({ accept(bound) }, "display-client").apply { isDaemon = true }.start()
+        Thread({ accept(bound) }, "carplay-video-settings").apply { isDaemon = true }.start()
         return bound.localPort
     }
 

@@ -571,7 +571,7 @@ object CastLog {
              * hand out of JSONL means scrolling through escaped strings. These
              * two extra views are generated from the same lines:
              *
-             *   timeline.txt  — every channel, merged, in 对照实现's shape
+             *   timeline.txt  — every channel, merged, in the shape described above
              *                   (`[time] [session] [thread] [+ms] TAG: text`)
              *   channel/X.log — the same lines for one subsystem only
              *
@@ -628,7 +628,7 @@ object CastLog {
     /**
      * Renders events the way they are read in a text editor.
      *
-     * Shape and column order follow the reference sender so two captures can be
+     * Shape and column order follow an established sender so two captures can be
      * diffed by eye without reformatting either:
      *
      *     [10:42:07.376] [5a22d0fa/B] [airplay-audio] [+1234ms] AUDIO: 音频首包 …

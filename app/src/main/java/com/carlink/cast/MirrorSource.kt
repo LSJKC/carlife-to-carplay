@@ -157,7 +157,7 @@ internal class MirrorSource(private val context: Context) : PhoneProjectionAdapt
             // A
             // sync frame every second on a large raster is a third of the
             // bitrate spent on redundancy. The car asks for one explicitly
-            // One-second GOP, matching the 对照实现 sender (Yo.java) which
+            // One-second GOP, matching an established sender which
             // keeps this car connected. max-bframes=0 and
             // repeat-previous-frame-after come from the same block: no
             // B-frames (each is reorder latency) and a 100 ms keep-alive frame

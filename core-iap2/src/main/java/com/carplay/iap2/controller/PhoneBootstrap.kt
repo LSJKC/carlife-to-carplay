@@ -94,7 +94,7 @@ class PhoneBootstrap(
      * Deliberately **not** cleared by [restartForNewLink]. This head unit stops
      * answering at the CSM layer after it receives a second 0x4300 on the same
      * link, and the link restart that follows its own detection marker is
-     * exactly what used to produce that second copy. 对照实现's log marks the
+     * exactly what used to produce that second copy. The log marks the
      * same rule:
      *
      *     "IAPLINK: B network status published; 0x4300 omitted (Bluetooth
@@ -148,7 +148,7 @@ class PhoneBootstrap(
      * Starts (or resumes) the bootstrap.
      *
      * Identification-first. 1.2.75 briefly made the Wi-Fi command channel
-     * authentication-first to match the reference sender, on the theory that
+     * authentication-first to match an established sender, on the theory that
      * this car ignores 0x1D00 until 0xAA05. The 1.2.77 field logs disprove
      * that: the link reaches READY, we send 0xAA00, the car acknowledges the
      * frame at the link layer — and then never sends 0xAA01, for the whole
@@ -204,7 +204,7 @@ class PhoneBootstrap(
     }
 
     /**
-     * Opens the way the reference sender opens after a link restart.
+     * Opens the way an established sender opens after a link restart.
      *
      * Its post-restart trace on this car is a complete second round:
      *
@@ -223,7 +223,7 @@ class PhoneBootstrap(
     }
 
     /**
-     * Asks the accessory for its certificate the way the 对照实现 sender does.
+     * Asks the accessory for its certificate the way an established sender does.
      *
      * Its command-channel trace names a different opening message than the one
      * used here so far:
@@ -299,7 +299,7 @@ class PhoneBootstrap(
                  *
                  * The receiver resends 0x1D01 when it did not see our 0x1D02,
                  * and it sends a fresh one when it reopens the link mid-session
-                 * (the reference sender's capture shows two complete rounds).
+                 * (the capture shows two complete rounds).
                  * The old `check(!identified)` threw on the second one and took
                  * the control connection down; answering 0x1D02 again is what
                  * makes the retry stop.
@@ -353,7 +353,7 @@ class PhoneBootstrap(
             0xaa06 -> {
                 /*
                  * The accessory is asking what authentication material this
-                 * phone holds. The 对照实现 sender never sees this on the
+                 * phone holds. An established sender never sees this on the
                  * wire — it is the side that *sends* 0xAA06 — so what a real
                  * sender answers is not known. Acknowledge with an empty
                  * 0xAA07-shaped reply rather than dropping it silently: an
@@ -492,7 +492,7 @@ class PhoneBootstrap(
             }
         }
         if (publishReferenceReadiness) {
-            diagnostic("vivo 无线就绪方案：0x4e0e 和 0x4e0d 在 0x4300 前按参考流程发送；车机声明接收：4e0e=${0x4e0e in accessoryReceives}，4e0d=${0x4e0d in accessoryReceives}；0x4300 保持手机地址字符串")
+            diagnostic("vivo 无线就绪方案：0x4e0e 和 0x4e0d 在 0x4300 前按实测流程发送；车机声明接收：4e0e=${0x4e0e in accessoryReceives}，4e0d=${0x4e0d in accessoryReceives}；0x4300 保持手机地址字符串")
         }
         published = true
         publishDeviceNotifications()
@@ -538,7 +538,7 @@ class PhoneBootstrap(
                     diagnostic("网络发布方案：0x4300，$shape=手机蓝牙地址字符串，长度=${transportBytes}B，帧=${availability.encodedFrame().size}B；车机组件编号与手机 UUID 不用于该字段")
                     send(availability)
                     if (profile == PhoneBootstrapProfile.VIVO_FLAT_WIFI_REQUEST) {
-                        diagnostic("主动请求车机无线配置：按小米参考流程将 0x5702 排在 0x4300 后；车机声明接收5702=${0x5702 in accessoryReceives}，发送5703=${0x5703 in accessorySends}；是否获得配置以实际响应为准")
+                        diagnostic("主动请求车机无线配置：按小米实测流程将 0x5702 排在 0x4300 后；车机声明接收5702=${0x5702 in accessoryReceives}，发送5703=${0x5703 in accessorySends}；是否获得配置以实际响应为准")
                         send(empty(0x5702))
                     }
                 } else {

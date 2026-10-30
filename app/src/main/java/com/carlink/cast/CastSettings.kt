@@ -107,7 +107,7 @@ class CastSettings(context: Context) {
      * Off by default: the compositor is what paints wallpaper outside the safe
      * area, and that is the picture this app is built around. On, the pipeline
      * skips the decode/composite/encode stage entirely and CarLife is asked to
-     * encode the full panel instead of the safe rectangle — the shape a-sender
+     * encode the full panel instead of the safe rectangle — the shape an established sender
      * uses on the same Honor CarLife build.
      *
      * Kept as a setting rather than a build-time choice because it doubles as a

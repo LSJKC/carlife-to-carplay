@@ -329,7 +329,7 @@ internal class BluetoothBootstrap(
             /*
              * Idle watchdog on the Bluetooth link.
              *
-             * The 对照实现 sender treats 20 s without any inbound iAP2 frame
+             * An established sender treats 20 s without any inbound iAP2 frame
              * as a dead control channel and rebuilds it:
              *
              *     "蓝牙已连接，但 N 秒未收到车机 iAP2 应答，正在重建控制通道"
@@ -404,7 +404,7 @@ internal class BluetoothBootstrap(
     }
 
     /**
-     * Bluetooth link idle budget, matching the 对照实现 sender's 20 s.
+     * Bluetooth link idle budget, matching the 20 s.
      *
      * That sender rebuilds its control channel after this long without an
      * inbound iAP2 frame (`C0237ic`: `this.b = 20000L`). Same number here so a
@@ -544,7 +544,7 @@ internal class BluetoothBootstrap(
      * already been told over the Wi-Fi command channel to stop using this link.
      * Only the RFCOMM/iAP2 session goes away — the Android Bluetooth pairing,
      * and with it A2DP and HFP, stays exactly as it was, so phone calls and
-     * media keep working. The reference sender's log draws the same line:
+     * media keep working. the log draws the same line:
      *
      *     HANDOFF accepted; bootstrap RFCOMM retired; Android Bluetooth retained
      *

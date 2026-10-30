@@ -422,7 +422,7 @@ internal class CarLifePanelCompositor(
     /**
      * Seconds between the encoder's own IDRs.
      *
-     * Back to 1, matching the 对照实现 sender (`Yo.java`:
+     * Back to 1, matching an established sender:
      * `setInteger("i-frame-interval", 1)`), which is the sender known to hold
      * this car's session open. 1.2.96 raised this to 5 on the theory that
      * frequent key frames were starving the link; the reference that actually
@@ -435,7 +435,7 @@ internal class CarLifePanelCompositor(
     /**
      * Clamps the requested bitrate to what this encoder actually supports.
      *
-     * The 对照实现 sender reads `getBitrateRange()` from the codec and clamps
+     * An established sender reads `getBitrateRange()` from the codec and clamps
      * into it before building the format. Handing a codec a rate it cannot
      * honour either throws or gets silently rounded, and either way the car's
      * buffer math no longer matches what was negotiated.
@@ -455,7 +455,7 @@ internal class CarLifePanelCompositor(
                 setInteger(MediaFormat.KEY_FRAME_RATE, outputFps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyFrameIntervalSeconds)
                 /*
-                 * The three settings below are copied from the 对照实现
+                 * The three settings below are copied from an established sender
                  * sender's encoder block; none of them existed here before.
                  *
                  *  - `max-fps-to-encoder` pins the encoder to the negotiated
@@ -478,7 +478,7 @@ internal class CarLifePanelCompositor(
         /**
          * Clamps the requested bitrate to what this encoder actually supports.
          *
-         * The 对照实现 sender reads `getBitrateRange()` from the codec and
+         * An established sender reads `getBitrateRange()` from the codec and
          * clamps into it before building the format. Handing a codec a rate it
          * cannot honour either throws or gets silently rounded, and either way
          * the car's buffer math no longer matches what was negotiated.
@@ -916,7 +916,7 @@ internal class CarLifePanelCompositor(
                  * Print the settings this build actually asked for, next to
                  * what the codec reports back.
                  *
-                 * Every value here came from the 对照实现 sender and cannot
+                 * Every value here came from an established sender and cannot
                  * be confirmed from a session log otherwise: a codec is free to
                  * ignore `max-bframes` or round the bitrate, and the only way
                  * to tell "we set it" from "the codec honoured it" is to log

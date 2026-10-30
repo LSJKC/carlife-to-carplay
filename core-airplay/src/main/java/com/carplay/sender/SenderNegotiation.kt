@@ -77,7 +77,7 @@ object SenderNegotiation {
      * Picks the media stream from the formats the head unit actually advertises.
      *
      * Buick E2LB advertises both `type=100/media` PCM and
-     * `type=102/media` AAC-LC. The 对照实现 sender — the one known to hold a
+     * `type=102/media` AAC-LC. An established sender — the one known to hold a
      * session open on this car class — drives **PCM** as its main path
      * (`C0142f1.E()` selects `type == 100` and falls back to a 48 kHz baseline
      * when `/info` declares nothing usable), and its own diagnostic strings say
@@ -122,7 +122,7 @@ object SenderNegotiation {
             if (aac.isNotEmpty()) return aac
         }
 
-        // PCM first, matching the 对照实现 sender's main path. Some HUs
+        // PCM first, matching the main path. Some HUs
         // declare type 100 with a zero output mask; those entries are skipped
         // rather than trusted, because an input-only description produces an
         // accepted SETUP with no audible output.
@@ -148,12 +148,11 @@ object SenderNegotiation {
     /**
      * Samples per LPCM RTP packet.
      *
-     * 352 = 7.33 ms at 48 kHz. This is the value the 对照实现 sender
+     * 352 = 7.33 ms at 48 kHz. This is the value an established sender
      * negotiates on this car class and the one its audio pipeline is built
-     * around (`D3.java`: "，每包 352 帧"). An earlier build used 240 (5 ms)
-     * from a different reference sender; both are accepted by the receiver,
-     * but 352 is what a sender known to stay connected uses, so it is the
-     * default here.
+     * around. An earlier build used 240 (5 ms)
+     * from an earlier build; both are accepted by the receiver, but 352 is what
+     * a connection that stays up uses, so it is the default here.
      */
     const val PCM_SAMPLES_PER_PACKET = 352
 }

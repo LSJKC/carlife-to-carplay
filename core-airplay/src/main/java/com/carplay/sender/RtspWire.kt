@@ -178,7 +178,7 @@ class RtspWire(
 
     private companion object {
         /**
-         * `User-Agent: AirPlay/566.25.21` — 对照实现 0.3.19's value.
+         * `User-Agent: AirPlay/566.25.21` — an established sender 0.3.19's value.
          *
          * It is the same build number it declares as `sourceVersion` in SETUP
          * (`C0281k1`), so the two are not independent knobs: a sender that
