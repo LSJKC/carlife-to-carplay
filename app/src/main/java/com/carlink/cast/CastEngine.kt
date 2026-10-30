@@ -120,6 +120,10 @@ internal class CastEngine(
                 hid = hid,
                 bluetoothAlive = { link.isAlive() },
                 bluetoothIdentity = { link.identityFingerprint() },
+                // Retired only after the Wi-Fi side is carrying the session;
+                // the Android Bluetooth pairing is untouched, so calls and
+                // media over A2DP/HFP keep working.
+                onBluetoothRetire = { link.retireAfterHandoff() },
                 log = { message -> log(message) },
                 nowPlayingPublisher = nowPlaying,
             )

@@ -59,6 +59,8 @@ internal class AirPlayLink(
     private val hid: Iap2HidDispatcher,
     private val bluetoothAlive: () -> Boolean,
     private val bluetoothIdentity: () -> ByteArray?,
+    /** Retires the Bluetooth iAP2 session after the Wi-Fi handoff. */
+    private val onBluetoothRetire: (() -> Unit)? = null,
     private val log: (String) -> Unit,
     /**
      * Shared with the Bluetooth link, which subscribes first.
@@ -105,6 +107,8 @@ internal class AirPlayLink(
      * lost link really does make the car reset everything.
      */
     @Volatile private var wifiControlReady = false
+    /** The Wi-Fi command-channel iAP2 session, once the car has opened it. */
+    @Volatile private var wifiCommand: Iap2Session? = null
     private val bluetoothReleased = AtomicBoolean()
 
     fun isWirelessHandoffComplete(): Boolean = wifiControlReady
@@ -469,6 +473,37 @@ internal class AirPlayLink(
             return alive
         }
 
+        /**
+         * Moves the control session from Bluetooth to Wi-Fi, once AirPlay is up.
+         *
+         * The reference sender's post-RECORD trace does this in two steps and
+         * ends with the RFCOMM gone while the Android Bluetooth pairing — and
+         * therefore A2DP and HFP — stays:
+         *
+         *     HANDOFF begin epoch=1 profile=B networkReady=true
+         *     POST /command  (iAPSendMessage → car replies 200)
+         *     HANDOFF accepted; bootstrap RFCOMM retired; Android Bluetooth retained
+         *
+         * What is reproduced here is the part that is observable on the wire and
+         * safe to reproduce: the Bluetooth iAP2 session is retired after the
+         * Wi-Fi link has carried the AirPlay session. The car keeps using the
+         * Wi-Fi command channel for later control traffic.
+         *
+         * Deliberately not gated on [wifiControlReady]: on this head unit that
+         * flag never becomes true, because the command channel answers nothing
+         * at the CSM layer. Waiting for it would mean never handing over.
+         */
+        override fun handoffToWifi() {
+            if (!bluetoothReleased.compareAndSet(false, true)) return
+            log(
+                "RECORD 已完成：把控制权交给 Wi-Fi" +
+                    "（蓝牙 iAP2=${if (bluetoothAlive()) "在线，准备退休" else "已不在"}，" +
+                    "Wi-Fi 命令通道=${if (wifiCommand != null) "已同步" else "未建立"}）",
+            )
+            runCatching { onBluetoothRetire?.invoke() }
+                .onFailure { log("蓝牙控制会话退休失败：${it.message ?: it.javaClass.simpleName}") }
+        }
+
         override fun iapControl(stream: BlockingDuplexByteStream): CompletableFuture<Unit> {
             val done = CompletableFuture<Unit>()
             // Set by the link layer when the car restarts its iAP2 link under
@@ -497,6 +532,12 @@ internal class AirPlayLink(
                         )
                     } else {
                         Iap2Session.controllerTunnel(stream)
+                    }
+                    if ((stream as? com.carplay.sender.PhoneIapTunnel)?.isCommandTunnel == true) {
+                        // Kept so the handoff can speak on this link after it
+                        // comes up; every other use of the session stays inside
+                        // this thread.
+                        wifiCommand = runtime
                     }
                     check(runtime.awaitReady(15_000)) { "Wi-Fi iAP2 链路同步超时" }
                     CastLog.stage(CastStage.PAIR, "Wi-Fi 控制通道已同步，独立验证车机")

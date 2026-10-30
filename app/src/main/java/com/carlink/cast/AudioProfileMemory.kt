@@ -52,6 +52,7 @@ internal class AudioProfileMemory(context: Context, private val receiver: String
      */
     fun order(candidates: List<SenderAudioFormat>): List<SenderAudioFormat> {
         if (candidates.isEmpty()) return emptyList()
+        discardUnreliableHistory()
         val rejected = prefs.getString("$scope:rejected", null)
             ?.split(',')
             ?.map { it.trim() }
@@ -66,6 +67,29 @@ internal class AudioProfileMemory(context: Context, private val receiver: String
 
     /** The last profile that produced audio on this receiver, for diagnostics only. */
     fun lastWorking(): String? = prefs.getString("$scope:working", null)
+
+    /**
+     * Drops every demotion this build did not earn.
+     *
+     * Up to 1.3.21 a profile was marked rejected whenever a session ended after
+     * carrying any audio packets at all. On this head unit the *session* is torn
+     * down at 13.1 s for reasons that have nothing to do with the codec, so that
+     * rule wrote off every profile it ever tried — the field log shows PCM
+     * marked `已拒` before it had ever been used, which then kept AAC first for
+     * the life of the install.
+     *
+     * Those entries cannot be re-judged, and keeping them would let a bug in the
+     * judging rule outlive its fix. The rule itself is fixed as well
+     * ([AUDIO_PROFILE_REJECT_MIN_PACKETS]); this only clears the damage already
+     * on disk, once.
+     */
+    private fun discardUnreliableHistory() {
+        if (prefs.getBoolean(KEY_HISTORY_CLEARED, false)) return
+        prefs.edit()
+            .remove("$scope:rejected")
+            .putBoolean(KEY_HISTORY_CLEARED, true)
+            .apply()
+    }
 
     /** Profiles this receiver has refused, in the order they were refused. */
     fun rejected(): List<String> = prefs.getString("$scope:rejected", null)
@@ -113,5 +137,10 @@ internal class AudioProfileMemory(context: Context, private val receiver: String
         prefs.edit()
             .putString("$scope:rejected", rejected.distinct().joinToString(","))
             .apply()
+    }
+
+    private companion object {
+        /** One-time marker: demotions written by the old judging rule are void. */
+        const val KEY_HISTORY_CLEARED = "history_cleared_1_3_22"
     }
 }

@@ -75,6 +75,8 @@ internal class BluetoothBootstrap(
         ?: error("手机不支持蓝牙")
     private val peer: BluetoothDevice = bluetooth.getRemoteDevice(peerAddress)
     private val closed = AtomicBoolean()
+    /** Set once the Wi-Fi side has taken over and this iAP2 session was retired. */
+    private val retired = AtomicBoolean()
     private val owned = mutableListOf<AutoCloseable>()
     // The GM head unit sends the iAP2 marker and its own SYN; the phone answers
     // with an exact SYN/ACK echo. This is the sequence CarWith completed in the
@@ -534,6 +536,30 @@ internal class BluetoothBootstrap(
 
     /** Reads the link without consuming protocol frames; used only for diagnostics. */
     fun isAlive(): Boolean = !closed.get() && socket?.isConnected == true && session?.isClosed == false
+
+    /**
+     * Retires the iAP2 control session after the Wi-Fi side has taken over.
+     *
+     * This is the second half of the handoff: by the time it runs, the car has
+     * already been told over the Wi-Fi command channel to stop using this link.
+     * Only the RFCOMM/iAP2 session goes away — the Android Bluetooth pairing,
+     * and with it A2DP and HFP, stays exactly as it was, so phone calls and
+     * media keep working. The reference sender's log draws the same line:
+     *
+     *     HANDOFF accepted; bootstrap RFCOMM retired; Android Bluetooth retained
+     *
+     * The receiver thread is interrupted before the socket is closed so it
+     * cannot log a spurious "read failed" for a close we asked for.
+     */
+    fun retireAfterHandoff() {
+        if (!retired.compareAndSet(false, true)) return
+        log("蓝牙 iAP2 控制会话已退休（Android 蓝牙配对保留）")
+        runCatching { receiver?.interrupt() }
+        owned.reversed().forEach { runCatching { it.close() } }
+        owned.clear()
+        runCatching { phoneService?.close() }
+        phoneService = null
+    }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return

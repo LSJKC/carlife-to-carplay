@@ -46,6 +46,14 @@ interface SenderEvents {
     fun audioSent()
     fun audioFormat(format: SenderAudioFormat)
     fun bluetoothControlAvailable(): Boolean
+    /**
+     * The AirPlay session is live; move the control channel off Bluetooth.
+     *
+     * Called once, right after RECORD. An owner that has no separate Bluetooth
+     * session (or that cannot tell the car about the move) leaves this as the
+     * default no-op.
+     */
+    fun handoffToWifi() = Unit
     fun iapControl(stream: BlockingDuplexByteStream): CompletableFuture<Unit>
     fun failed(error: Throwable)
 }
@@ -926,6 +934,23 @@ class AirPlaySender(
         events.diagnostic("屏幕 RECORD 已完成，等待 startDisplay 启动来源编码器")
         recordCompletedNanos = System.nanoTime()
         startDisconnectHeartbeat()
+        /*
+         * Hand the control session over from Bluetooth to Wi-Fi.
+         *
+         * The car is running two iAP2 links at this point: the Bluetooth one
+         * that carried discovery and authentication, and the Wi-Fi command link
+         * it opened itself once AirPlay came up. The reference sender tells the
+         * car over the Wi-Fi link to stop using the Bluetooth one — its
+         * `iAPSendMessage` handoff, accepted with a 200 — and only then retires
+         * the RFCOMM session:
+         *
+         *     HANDOFF accepted; bootstrap RFCOMM retired; Android Bluetooth retained
+         *
+         * This runs after RECORD rather than after the Wi-Fi link authenticates
+         * because on this head unit the Wi-Fi link never answers at the CSM
+         * layer, so waiting for it means never handing over at all.
+         */
+        events.handoffToWifi()
         val keepAliveWithStats = (info["keepAliveSendStatsAsBody"] == true) ||
             ((info["keepAliveSendStatsAsBody"] as? Number)?.toInt() == 1)
         startVideoKeepAlive(keepAliveWithStats)
@@ -2513,10 +2538,24 @@ class AirPlaySender(
         /*
          * A profile is only considered rejected when SETUP succeeded, real
          * audio packets were already emitted, and the session died before the
-         * same 20-second proof window used for a working profile.  This keeps
-         * display/Bluetooth failures from poisoning the audio candidate list.
+         * proof window used for a working profile.
+         *
+         * The window has to be longer than any failure that is not the audio
+         * stream's fault. It used to be 20 s and this car tears the *whole
+         * session* down at 13.1 s, so every profile that ever carried packets
+         * was eventually marked rejected — including ones never actually
+         * judged. The field log shows the damage: PCM was written off as
+         * `已拒` before it had ever been tried, leaving AAC to be chosen for a
+         * car whose own reference sender uses PCM.
+         *
+         * A real audio-stream rejection on this head unit shows up within a
+         * second or two (the car stops advancing `sampleTime` and resets the
+         * link), so a packet-count floor is enough to separate "the car refused
+         * this codec" from "the whole session ended for an unrelated reason".
          */
-        if (audioProfileSetupComplete && !audioProfileStable && audioPacketsSent > 0L) {
+        if (audioProfileSetupComplete && !audioProfileStable &&
+            audioPacketsSent >= AUDIO_PROFILE_REJECT_MIN_PACKETS
+        ) {
             selectedAudio?.let { audioProfileRejected?.invoke(it) }
         }
         audioProfileSetupComplete = false
@@ -2614,6 +2653,17 @@ class AirPlaySender(
         private const val PCM_INPUT_BUFFER_SAMPLES = 0
         private const val PCM_OUTPUT_BUFFER_SAMPLES = 0
         private const val AUDIO_PROFILE_STABLE_WINDOW_MS = 20_000L
+
+        /**
+         * Packets a profile must have carried before a failed session can count
+         * as that profile being rejected.
+         *
+         * Too low and every unrelated teardown poisons the candidate list —
+         * which is exactly what happened: PCM was marked `已拒` without ever
+         * having been tried. A genuine codec refusal shows up almost at once,
+         * so 100 packets (about 2 s of AAC, 0.7 s of PCM) is the boundary.
+         */
+        private const val AUDIO_PROFILE_REJECT_MIN_PACKETS = 100L
 
         /**
          * Scheduling lead for the screen stream — 对照实现's value.
