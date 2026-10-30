@@ -507,21 +507,35 @@ internal class AirPlayLink(
          *     POST /command  (iAPSendMessage → car replies 200)
          *     HANDOFF accepted; bootstrap RFCOMM retired; Android Bluetooth retained
          *
-         * What is reproduced here is the part that is observable on the wire and
-         * safe to reproduce: the Bluetooth iAP2 session is retired after the
-         * Wi-Fi link has carried the AirPlay session. The car keeps using the
-         * Wi-Fi command channel for later control traffic.
+         * Note what its own log requires before it retires anything: a working
+         * Wi-Fi control link to retire *to*. This car gives us none — the
+         * command channel answers nothing at the CSM layer, which is the whole
+         * reason this session is stuck. Retiring Bluetooth without that
+         * fallback removes the only control channel that works, and the session
+         * dies within a second:
          *
-         * Deliberately not gated on [wifiControlReady]: on this head unit that
-         * flag never becomes true, because the command channel answers nothing
-         * at the CSM layer. Waiting for it would mean never handing over.
+         *     +5937ms  屏幕 RECORD 已完成
+         *     +5938ms  把控制权交给 Wi-Fi（蓝牙 iAP2=在线，准备退休，Wi-Fi 命令通道=未建立）
+         *     +5939ms  蓝牙 iAP2 控制会话已退休
+         *     +6715ms  投屏会话失败：蓝牙链路已断开
+         *
+         * So retirement is gated on the Wi-Fi command channel actually being
+         * ready. Until it is, Bluetooth stays — which is what every build before
+         * 1.3.22 did, and what let the session reach the car's own 13 s teardown
+         * instead of dying in under a second.
          */
         override fun handoffToWifi() {
+            if (!closed.get() && !wifiControlReady) {
+                logChannel(LogChannel.SESSION,
+                    "RECORD 已完成：暂不交接" +
+                        "（Wi-Fi 命令通道尚未就绪，蓝牙 iAP2 是当前唯一可用的控制链路）",
+                )
+                return
+            }
             if (!bluetoothReleased.compareAndSet(false, true)) return
             logChannel(LogChannel.SESSION,
                 "RECORD 已完成：把控制权交给 Wi-Fi" +
-                    "（蓝牙 iAP2=${if (bluetoothAlive()) "在线，准备退休" else "已不在"}，" +
-                    "Wi-Fi 命令通道=${if (wifiCommand != null) "已同步" else "未建立"}）",
+                    "（蓝牙 iAP2=${if (bluetoothAlive()) "在线，准备退休" else "已不在"}）",
             )
             runCatching { onBluetoothRetire?.invoke() }
                 .onFailure { logChannel(LogChannel.BT, "蓝牙控制会话退休失败：${it.message ?: it.javaClass.simpleName}") }
