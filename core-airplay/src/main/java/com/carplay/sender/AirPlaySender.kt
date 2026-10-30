@@ -2446,11 +2446,70 @@ class AirPlaySender(
             "待发缓冲=${pcmCarry.size}B 丢弃=${pcmCarryDropped}B"
     }
 
+    /**
+     * Hands the session back to the car instead of simply vanishing.
+     *
+     * Three steps, in the order the reference sender uses, each with its own
+     * failure path so a socket that is already gone cannot stop the rest:
+     *
+     *   1. `modesChanged` with both resources on the accessory. This is what
+     *      ends the display session — the car drops the mirroring stream and
+     *      brings its own UI back. Sending it alone is enough for the car to
+     *      leave CarPlay immediately.
+     *   2. `TEARDOWN /` so the RTSP session is closed by the book.
+     *   3. Nothing else: the iAP2 availability frame belongs to whoever owns
+     *      that link, and the car already treats the ownership release as the
+     *      end of the session.
+     *
+     * Skipped entirely when the screen was never claimed: a session that never
+     * showed anything has nothing to hand back, and the extra frames would be
+     * noise on a link that is failing for an unrelated reason.
+     */
+    private fun retireGracefully() {
+        val wire = control ?: return
+        if (!modes.ownsScreen() && !modes.ownsAudio()) return
+        val changed = modes.release()
+        if (!changed) return
+        events.diagnostic("会话结束：交还屏幕与音频所有权，并结束 RTSP 会话")
+        runCatching {
+            val reply = wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
+            events.diagnostic("交还所有权已发送：${reply.status ?: "无应答"}")
+        }.onFailure {
+            events.diagnostic("交还所有权失败：${it.message ?: it.javaClass.simpleName}")
+        }
+        runCatching {
+            wire.request("TEARDOWN", "/")
+        }.onFailure {
+            events.diagnostic("TEARDOWN 失败：${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
     override fun close() {
         if (!closed.get()) {
             runCatching { events.diagnostic(sessionSnapshot()) }
         }
         if (!closed.compareAndSet(false,true)) return
+        /*
+         * Tell the car this session is over before the sockets go away.
+         *
+         * Closing a CarPlay session without a word leaves the head unit
+         * holding a session it still believes is live: its own UI does not
+         * come back until its watchdog expires, which is exactly the
+         * "CarPlay 界面不退出" behaviour seen in the field. The reference
+         * sender's graceful retire does three things in order and the car
+         * returns home immediately:
+         *
+         *     retire-begin graceful=true
+         *     POST /command          (screen + audio ownership handed back,
+         *                             which also ends the display session)
+         *     0x4300 CarPlayAvailability 24B  (availability withdrawn)
+         *     TEARDOWN /
+         *
+         * This runs before the workers are interrupted so the control wire is
+         * still alive to carry it; every step is best effort and failures are
+         * recorded, never thrown.
+         */
+        runCatching { retireGracefully() }
         /*
          * A profile is only considered rejected when SETUP succeeded, real
          * audio packets were already emitted, and the session died before the

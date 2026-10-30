@@ -93,4 +93,30 @@ class SessionModes {
     @Synchronized fun audio(phone: Boolean) {
         resources.getValue(2).apply { owner = if (phone) 1 else 2; permanent = owner }
     }
+
+    /**
+     * Hands both resources back to the car, for a session that is ending.
+     *
+     * A sender that just closes its sockets leaves the head unit holding a
+     * CarPlay session it still believes is live: the car's own UI does not
+     * come back until its watchdog expires. 对照实现's graceful retire sends
+     * the same ownership snapshot with both resources on the accessory before
+     * TEARDOWN, and the car returns to its home screen immediately.
+     *
+     * Returns true when anything actually changed, so the caller only spends a
+     * frame on the wire when the car would otherwise be left thinking the
+     * phone still owns the screen.
+     */
+    @Synchronized fun release(): Boolean {
+        var changed = false
+        for (id in listOf(1L, 2L)) {
+            val resource = resources.getValue(id)
+            if (resource.owner != 2L || resource.permanent != 2L) {
+                resource.owner = 2
+                resource.permanent = 2
+                changed = true
+            }
+        }
+        return changed
+    }
 }
