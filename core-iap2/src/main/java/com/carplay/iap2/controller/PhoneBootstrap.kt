@@ -88,6 +88,24 @@ class PhoneBootstrap(
     private var identified = false
     private var authenticated = false
     private var published = false
+    /**
+     * True once a CarPlay availability declaration has gone out on this session.
+     *
+     * Deliberately **not** cleared by [restartForNewLink]. This head unit stops
+     * answering at the CSM layer after it receives a second 0x4300 on the same
+     * link, and the link restart that follows its own detection marker is
+     * exactly what used to produce that second copy. 对照实现's log marks the
+     * same rule:
+     *
+     *     "IAPLINK: B network status published; 0x4300 omitted (Bluetooth
+     *      bootstrap only)"
+     *
+     * and sends its availability once with the note "发后不管". Field capture
+     * 2026-10-30 shows ours going out twice, 2.05 s apart, with the 0x4301 only
+     * arriving after the *first* one — the second was pure noise on a receiver
+     * that treats it as a session reset.
+     */
+    private var availabilitySent = false
     private var networkRequestQueued = false
     private var controlReady = false
     private var versionInfo: AccessoryVersionInfo? = null
@@ -479,9 +497,18 @@ class PhoneBootstrap(
         published = true
         publishDeviceNotifications()
         if (publishTransport) send(Iap2Messages.buildRaw(0x4e0e) { string(0, checkNotNull(transport)) })
+        /*
+         * Availability goes out exactly once per session.
+         *
+         * Everything upstream of this point may run twice — a detection marker
+         * from the car resets the bootstrap and replays it — but the 0x4300
+         * itself is "发后不管". See [availabilitySent].
+         */
+        val mayDeclareAvailability = !availabilitySent
         if (profile != PhoneBootstrapProfile.GENERIC) {
             if (publishReferenceReadiness || acceptsNotification(0x4e0d)) send(Iap2Messages.buildRaw(0x4e0d) { u8(0, 1) })
-            if (supportsStart) {
+            if (supportsStart && mayDeclareAvailability) {
+                availabilitySent = true
                 if (profile == PhoneBootstrapProfile.MODERN_WIRELESS && PhoneBluetoothRecovery.isObservedFirmware(versionInfo)) {
                     diagnostic("GM 完整无线声明：0x4300 同时包含 group(0) 有线传输标识与 group(1) 蓝牙传输标识，满足车机 IAPAuthenticator 属性 1/2 门控")
                 }
@@ -519,9 +546,16 @@ class PhoneBootstrap(
                     diagnostic("网络发布方案：0x4300，车机无线组件=${component.id}，来源=0x1d01/24/0，supported=${component.supported} available=${component.available}")
                     send(Iap2CarPlayMessages.buildWirelessComponentAvailability(component.id))
                 }
+            } else if (supportsStart) {
+                // Already declared on this session: say so instead of sending it
+                // again, so a field capture can tell the two cases apart.
+                diagnostic("本轮不再发送 0x4300（本会话已声明过，发后不管）")
             } else send(empty(0x5702))
         } else {
-            if (supportsStart) send(Iap2CarPlayMessages.buildAvailability(bluetoothTransportIdentifier = checkNotNull(transport)))
+            if (supportsStart && mayDeclareAvailability) {
+                availabilitySent = true
+                send(Iap2CarPlayMessages.buildAvailability(bluetoothTransportIdentifier = checkNotNull(transport)))
+            }
             send(empty(0x5702))
         }
         networkRequestQueued = true
