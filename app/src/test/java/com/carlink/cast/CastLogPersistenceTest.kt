@@ -59,4 +59,41 @@ class CastLogPersistenceTest {
         assertEquals("连接断开", restored.detail)
         assertFalse(restored.running)
     }
+
+    @Test
+    fun channelAndThreadSurviveTheSnapshot() {
+        val state = CastState(
+            sessionId = "session-3",
+            events = listOf(
+                CastEvent(10, "INFO", "音频首包", channel = LogChannel.AUDIO.tag, thread = "carplay-audio-send"),
+                CastEvent(20, "WARN", "链路静默", channel = LogChannel.IAP.tag, thread = "carlink-wifi-control"),
+            ),
+        )
+
+        val restored = CastLog.stateFromSnapshot(
+            CastLog.snapshotJson(state, 1_000, 2_000, truncated = false),
+        ).events
+
+        assertEquals(LogChannel.AUDIO.tag, restored[0].channel)
+        assertEquals("carplay-audio-send", restored[0].thread)
+        assertEquals(LogChannel.IAP.tag, restored[1].channel)
+        assertEquals("WARN", restored[1].level)
+    }
+
+    @Test
+    fun sessionsRecordedBeforeChannelsStillLoad() {
+        // A snapshot written by an older build has neither field. It must load
+        // as APP with no thread rather than losing the line or failing.
+        val legacy = org.json.JSONObject()
+            .put("sessionId", "old")
+            .put("events", org.json.JSONArray().put(
+                org.json.JSONObject().put("elapsedMs", 5).put("level", "INFO").put("message", "旧日志"),
+            ))
+
+        val restored = CastLog.stateFromSnapshot(legacy).events.single()
+
+        assertEquals("旧日志", restored.message)
+        assertEquals(LogChannel.APP.tag, restored.channel)
+        assertEquals("", restored.thread)
+    }
 }

@@ -460,7 +460,10 @@ class MainActivity : AppCompatActivity() {
 
         logText.text = state.events.takeLast(80).joinToString("\n") {
             val seconds = (it.elapsedMillis / 1000).toInt()
-            "%02d:%02d  %s".format(Locale.US, seconds / 60, seconds % 60, it.message)
+            // The channel tag is what makes the on-screen log readable while a
+            // session is still running: it separates the audio lines from the
+            // iAP2 frames without needing the exported file.
+            "%02d:%02d  %-8s %s".format(Locale.US, seconds / 60, seconds % 60, it.channel, it.message)
         }.ifBlank { getString(R.string.logs_empty) }
 
         sourceBadge.text = sourceChipText(state)

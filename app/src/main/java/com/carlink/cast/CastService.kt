@@ -94,7 +94,7 @@ class CastService : Service() {
         acquireSessionLocks()
         CastLog.begin(source.name)
         val session = CastEngine(applicationContext, settings, source) { message ->
-            CastLog.event("INFO", message)
+            CastLog.event(com.carlink.cast.LogChannel.SESSION, "INFO", message)
         }
         engine = session
         runCatching {

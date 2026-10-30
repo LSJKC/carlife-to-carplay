@@ -40,7 +40,56 @@ enum class CastStage(val title: String, val detail: String, val step: Int) {
     }
 }
 
-data class CastEvent(val elapsedMillis: Long, val level: String, val message: String)
+/**
+ * Which part of the system a log line came from.
+ *
+ * The exported journal is a single time-ordered stream — one timeline is what
+ * lets an audio stall be read against the iAP2 frame that preceded it — but
+ * every line carries exactly one channel tag so the same file can be filtered
+ * down to one subsystem without losing its timestamps.
+ *
+ * Tags are uppercase and fixed-width enough to line up in a plain text viewer,
+ * and they are deliberately coarse: a tag that appears six times is a tag that
+ * does not help anyone find anything.
+ */
+enum class LogChannel(val tag: String) {
+    /** Bluetooth iAP2: RFCOMM link, link-layer frames, identification, authentication. */
+    BT("BT"),
+    /** Wi-Fi iAP2 command channel: link sync, CSM frames, 0x4300/0x4301. */
+    IAP("IAP"),
+    /** RTSP: SETUP, RECORD, TEARDOWN, command channel, keepalives. */
+    RTSP("RTSP"),
+    /** AirPlay session state: resources, modes, ownership, handoff. */
+    AIRPLAY("AIRPLAY"),
+    /** Video: encoder, frames, CONFIG/IDR, bitrate, drops. */
+    VIDEO("VIDEO"),
+    /** Audio: negotiation, SETUP, RTP packets, the car's sampleTime. */
+    AUDIO("AUDIO"),
+    /** CarLife: process, ports, encoder negotiation, its own audio/media ports. */
+    CARLIFE("CARLIFE"),
+    /** Touch and hardware keys in both directions. */
+    INPUT("INPUT"),
+    /** Now-playing metadata (0x5000/0x5001, cover art). */
+    MEDIA("MEDIA"),
+    /** Wi-Fi association, addressing, routing. */
+    NETWORK("NETWORK"),
+    /** Session lifecycle: start, stages, teardown, recovery. */
+    SESSION("SESSION"),
+    /** Periodic counters: fps, bitrate, packet rates, buffer depth. */
+    PERF("PERF"),
+    /** Everything that does not fit above, and lines predating channels. */
+    APP("APP"),
+}
+
+data class CastEvent(
+    val elapsedMillis: Long,
+    val level: String,
+    val message: String,
+    /** Subsystem tag; [LogChannel.APP] for lines that do not name one. */
+    val channel: String = LogChannel.APP.tag,
+    /** Thread that produced the line, so interleaved workers stay readable. */
+    val thread: String = "",
+)
 
 data class CastMetric(val elapsedMillis: Long, val fps: Double, val kbps: Double)
 
@@ -91,6 +140,8 @@ object CastLog {
     val state = mutable.asStateFlow()
 
     @Volatile private var directory: File? = null
+    /** Application context, kept only to read the device facts at session start. */
+    @Volatile private var appContext: Context? = null
     @Volatile private var journal: File? = null
     @Volatile private var activeSessionId = ""
     private var initialized = false
@@ -109,6 +160,7 @@ object CastLog {
 
     @Synchronized fun initialize(context: Context) {
         if (initialized) return
+        appContext = context.applicationContext
         directory = File(context.filesDir, "sessions").apply { mkdirs() }
         initialized = true
         restoreLatestSession()
@@ -137,10 +189,64 @@ object CastLog {
             stage = CastStage.BLUETOOTH,
             detail = CastStage.BLUETOOTH.detail,
         )
-        event("INFO", "会话开始，画面来源：$source，版本=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})，构建=${BuildConfig.BUILD_ID}")
+        event(LogChannel.SESSION, "INFO",
+            "会话开始，画面来源：$source，版本=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})，构建=${BuildConfig.BUILD_ID}")
+        /*
+         * The environment block.
+         *
+         * Everything here is a fact that a reader otherwise has to ask for
+         * later: which build of the phone's software is running, what the
+         * device says it is, and which subsystems are even available. A report
+         * of "no sound" means something different on a phone with no
+         * notification access than on one that has it.
+         */
+        deviceFacts().forEach { (channel, line) -> event(channel, "INFO", line) }
         persistSnapshot()
         pruneOldSessions()
         return id
+    }
+
+    /** Device and build facts, emitted once at the head of every session. */
+    private fun deviceFacts(): List<Pair<LogChannel, String>> {
+        val app = appContext ?: return emptyList()
+        val facts = mutableListOf<Pair<LogChannel, String>>()
+        runCatching {
+            val info = app.packageManager.getPackageInfo(app.packageName, 0)
+            facts += LogChannel.SESSION to
+                "应用：${info.packageName} 版本=${info.versionName} 构建时间=${info.lastUpdateTime}"
+        }
+        runCatching {
+            val pm = app.packageManager
+            val enabled = pm.getApplicationInfo("com.baidu.carlife.honor", 0).enabled
+            facts += LogChannel.CARLIFE to "CarLife 已安装（enabled=$enabled）"
+        }.onFailure {
+            facts += LogChannel.CARLIFE to "CarLife 未安装或不可见：${it.javaClass.simpleName}"
+        }
+        runCatching {
+            val notificationAccess = android.provider.Settings.Secure.getString(
+                app.contentResolver,
+                "enabled_notification_listeners",
+            ).orEmpty().contains(app.packageName)
+            facts += LogChannel.MEDIA to "通知使用权=$notificationAccess（影响 NowPlaying 与媒体卡）"
+        }
+        runCatching {
+            val adapter = app.getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+            facts += LogChannel.BT to
+                "蓝牙开关=${adapter?.isEnabled} 已配对设备=${adapter?.bondedDevices?.size ?: -1}"
+        }
+        runCatching {
+            val wifi = app.getSystemService(android.net.wifi.WifiManager::class.java)
+            facts += LogChannel.NETWORK to
+                "Wi-Fi 开关=${wifi?.isWifiEnabled} 锁=${wifi?.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "carlink-probe") != null}"
+        }
+        runCatching {
+            facts += LogChannel.SESSION to
+                "设备：${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL} " +
+                "Android=${android.os.Build.VERSION.RELEASE}(${android.os.Build.VERSION.SDK_INT})"
+        }
+        facts += LogChannel.SESSION to
+            "时间：${java.time.LocalDateTime.now()} 时区=${java.util.TimeZone.getDefault().id}"
+        return facts
     }
 
     @Synchronized fun stage(stage: CastStage, detail: String = stage.detail) {
@@ -172,9 +278,26 @@ object CastLog {
      */
     private const val MAX_EVENTS_IN_MEMORY = 3000
 
-    @Synchronized fun event(level: String, message: String) {
+    @Synchronized fun event(level: String, message: String) =
+        event(LogChannel.APP, level, message)
+
+    /**
+     * Records one line against a subsystem.
+     *
+     * The channel is stored, not just prefixed: the exported journal keeps it
+     * as its own JSON field so `jq 'select(.channel=="AUDIO")'` works, and the
+     * rendered text keeps the same tag at the head of the line so a plain text
+     * reader can do the same by eye.
+     */
+    @Synchronized fun event(channel: LogChannel, level: String, message: String) {
         val now = System.currentTimeMillis()
-        val event = CastEvent((now - startedAt).coerceAtLeast(0), level, message.take(2000))
+        val event = CastEvent(
+            elapsedMillis = (now - startedAt).coerceAtLeast(0),
+            level = level,
+            message = message.take(4000),
+            channel = channel.tag,
+            thread = Thread.currentThread().name,
+        )
         val current = mutable.value
         /*
          * Keep far more history than one screenful.
@@ -198,8 +321,18 @@ object CastLog {
         }
     }
 
-    @Synchronized fun video(bytes: Int, dropped: Boolean = false) {
-        val current = mutable.value
+    /**
+     * A logger bound to one channel.
+     *
+     * Modules take one of these instead of a bare `(String) -> Unit` so their
+     * lines land in the right channel without every call site repeating the
+     * tag — and so a module that gains a channel later only changes the point
+     * where its logger is created.
+     */
+    fun logger(channel: LogChannel, level: String = "INFO"): (String) -> Unit =
+        { message -> event(channel, level, message) }
+
+    @Synchronized fun video(bytes: Int, dropped: Boolean = false) {        val current = mutable.value
         mutable.value = if (dropped) current.copy(dropped = current.dropped + 1)
         else current.copy(frames = current.frames + 1, bytes = current.bytes + bytes)
         val now = System.currentTimeMillis()
@@ -412,6 +545,7 @@ object CastLog {
         if (sessionId.isBlank()) return null
         if (sessionId == mutable.value.sessionId) persistSnapshot()
         val snapshot = readSnapshot(sessionId) ?: legacySummary(sessionId, dir) ?: return null
+        val startedAtMillis = snapshot.optLong("startedAtMillis", 0L)
         val target = File(dir, "$sessionId.zip")
         ZipOutputStream(FileOutputStream(target, false)).use { zip ->
             zip.putNextEntry(ZipEntry("session.json"))
@@ -422,12 +556,39 @@ object CastLog {
                 file.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
             }
-            dir.listFiles()?.filter {
+            val parts = dir.listFiles()?.filter {
                 it.isFile && it.name.startsWith("$sessionId.part-") && it.name.endsWith(".jsonl")
-            }?.sortedBy { it.name }?.forEachIndexed { index, file ->
+            }?.sortedBy { it.name }.orEmpty()
+            parts.forEachIndexed { index, file ->
                 zip.putNextEntry(ZipEntry("events/part-${index + 1}.jsonl"))
                 file.inputStream().use { it.copyTo(zip) }
                 zip.closeEntry()
+            }
+            /*
+             * A readable timeline and one file per channel.
+             *
+             * The JSONL above is the machine format, but reading a session by
+             * hand out of JSONL means scrolling through escaped strings. These
+             * two extra views are generated from the same lines:
+             *
+             *   timeline.txt  — every channel, merged, in 对照实现's shape
+             *                   (`[time] [session] [thread] [+ms] TAG: text`)
+             *   channel/X.log — the same lines for one subsystem only
+             *
+             * Both are rebuilt at export time, so a session recorded before
+             * channels existed simply has everything under APP.
+             */
+            val journalFiles = listOfNotNull(File(dir, "$sessionId.jsonl").takeIf { it.isFile }) + parts
+            val events = journalFiles.flatMap { readJournalEvents(it) }
+            if (events.isNotEmpty()) {
+                zip.putNextEntry(ZipEntry("timeline.txt"))
+                zip.write(renderTimeline(events, sessionId, startedAtMillis).toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+                events.groupBy { it.channel }.toSortedMap().forEach { (channel, lines) ->
+                    zip.putNextEntry(ZipEntry("channel/${channel.lowercase()}.log"))
+                    zip.write(renderTimeline(lines, sessionId, startedAtMillis).toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
             }
             File(dir, "$sessionId.crash.txt").takeIf { it.isFile }?.let { file ->
                 zip.putNextEntry(ZipEntry("crash.txt"))
@@ -445,6 +606,63 @@ object CastLog {
             }
         }
         return target
+    }
+
+    /** Reads one journal shard back into events; malformed lines are skipped. */
+    private fun readJournalEvents(file: File): List<CastEvent> = runCatching {
+        file.useLines { lines ->
+            lines.mapNotNull { line ->
+                runCatching { JSONObject(line) }.getOrNull()?.let {
+                    CastEvent(
+                        elapsedMillis = it.optLong("elapsedMs"),
+                        level = it.optString("level", "INFO"),
+                        message = it.optString("message"),
+                        channel = it.optString("channel", LogChannel.APP.tag),
+                        thread = it.optString("thread"),
+                    )
+                }
+            }.toList()
+        }
+    }.getOrDefault(emptyList())
+
+    /**
+     * Renders events the way they are read in a text editor.
+     *
+     * Shape and column order follow the reference sender so two captures can be
+     * diffed by eye without reformatting either:
+     *
+     *     [10:42:07.376] [5a22d0fa/B] [airplay-audio] [+1234ms] AUDIO: 音频首包 …
+     *
+     * The tag is padded so messages start at the same column for the whole
+     * file; the level is only shown when it is not INFO, keeping the common
+     * case free of noise while errors stay greppable.
+     */
+    private fun renderTimeline(events: List<CastEvent>, sessionId: String, startedAtMillis: Long): String {
+        val shortSession = sessionId.take(8)
+        return buildString {
+            events.forEach { event ->
+                append('[').append(clock(event.elapsedMillis, startedAtMillis)).append("] ")
+                append('[').append(shortSession).append("/B] ")
+                append('[').append(event.thread.ifBlank { "-" }).append("] ")
+                append("[+").append(event.elapsedMillis).append("ms] ")
+                if (event.level != "INFO") {
+                    append(event.level).append(' ')
+                }
+                append(event.channel.padEnd(CHANNEL_TAG_WIDTH)).append(": ")
+                append(event.message)
+                append('\n')
+            }
+        }
+    }
+
+    private fun clock(elapsedMillis: Long, startedAtMillis: Long): String {
+        val at = java.time.Instant.ofEpochMilli((startedAtMillis + elapsedMillis).coerceAtLeast(0L))
+            .atZone(java.time.ZoneId.systemDefault())
+        return String.format(
+            java.util.Locale.US,
+            "%02d:%02d:%02d.%03d",
+            at.hour, at.minute, at.second, at.nano / 1_000_000,
+        )
     }
 
     @Synchronized internal fun snapshotJson(
@@ -493,9 +711,18 @@ object CastLog {
             running = snapshot.optBoolean("running"),
             events = (0 until events.length()).mapNotNull { index ->
                 events.optJSONObject(index)?.let {
-                    CastEvent(it.optLong("elapsedMs"), it.optString("level"), it.optString("message"))
+                    CastEvent(
+                        elapsedMillis = it.optLong("elapsedMs"),
+                        level = it.optString("level"),
+                        message = it.optString("message"),
+                        // Sessions recorded before channels existed have
+                        // neither field; they read back as APP with no thread
+                        // rather than failing to load.
+                        channel = it.optString("channel", LogChannel.APP.tag),
+                        thread = it.optString("thread"),
+                    )
                 }
-            }.takeLast(300),
+            }.takeLast(3000),
             metrics = (0 until metrics.length()).mapNotNull { index ->
                 metrics.optJSONObject(index)?.let {
                     CastMetric(it.optLong("elapsedMs"), it.optDouble("fps"), it.optDouble("kbps"))
@@ -710,5 +937,10 @@ object CastLog {
     private fun json(event: CastEvent) = JSONObject()
         .put("elapsedMs", event.elapsedMillis)
         .put("level", event.level)
+        .put("channel", event.channel)
+        .put("thread", event.thread)
         .put("message", event.message)
+
+    /** Column width for channel tags in the rendered timeline. */
+    private const val CHANNEL_TAG_WIDTH = 8
 }

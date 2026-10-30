@@ -39,7 +39,7 @@ internal class CastEngine(
     @Volatile private var bluetooth: BluetoothBootstrap? = null
     @Volatile private var vehicle: VehicleNetwork? = null
     @Volatile private var airplay: AirPlayLink? = null
-    private val hid = Iap2HidDispatcher(source) { message -> log(message) }
+    private val hid = Iap2HidDispatcher(source, CastLog.logger(LogChannel.INPUT))
 
     fun run(onFailure: (Throwable) -> Unit) {
         try {
@@ -77,7 +77,7 @@ internal class CastEngine(
              * the Wi-Fi command channel keeps its own fallback so a future
              * firmware that does answer there still works.
              */
-            val nowPlaying = NowPlayingPublisher(context) { message -> log(message) }
+            val nowPlaying = NowPlayingPublisher(context, CastLog.logger(LogChannel.MEDIA))
             val link = BluetoothBootstrap(
                 context = context,
                 peerAddress = peer,
@@ -87,7 +87,7 @@ internal class CastEngine(
                 // persistent AirPlay UUID is not a substitute.
                 transportIdentifier = address,
                 trust = { authenticated -> trustFor(peer, authenticated) },
-                log = { message -> log(message) },
+                log = CastLog.logger(LogChannel.BT),
                 startNowPlaying = { send, sendFile ->
                     val token = nowPlaying.subscribeDefault(send, sendFile)
                     log("已在蓝牙链路订阅车机媒体信息：token=$token")
@@ -98,7 +98,7 @@ internal class CastEngine(
             check(!closed.get()) { "连接已停止" }
             CastLog.stage(CastStage.NETWORK, "车机已下发无线配置，加入 ${result.endpoint.ssid}")
 
-            val network = VehicleNetwork(context, result.endpoint) { message -> log(message) }
+            val network = VehicleNetwork(context, result.endpoint, CastLog.logger(LogChannel.NETWORK))
             vehicle = network
             network.observeDefaultNetwork()
             network.join()
@@ -124,7 +124,8 @@ internal class CastEngine(
                 // the Android Bluetooth pairing is untouched, so calls and
                 // media over A2DP/HFP keep working.
                 onBluetoothRetire = { link.retireAfterHandoff() },
-                log = { message -> log(message) },
+                log = CastLog.logger(LogChannel.SESSION),
+                logChannel = { channel, message -> CastLog.event(channel, "INFO", message) },
                 nowPlayingPublisher = nowPlaying,
             )
             airplay = channel

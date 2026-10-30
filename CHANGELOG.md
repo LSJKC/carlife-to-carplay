@@ -5,6 +5,48 @@
 
 ---
 
+## 1.3.23 — 日志全面增强（分通道）
+
+调试期最需要的是「一条时间轴、能按子系统切开」。这一版照这个做。
+
+### 每条日志带通道标签
+
+| 标签 | 内容 |
+|---|---|
+| `BT` | 蓝牙 iAP2：RFCOMM、链路帧、识别、认证 |
+| `IAP` | Wi-Fi 命令通道：链路同步、CSM、0x4300/0x4301 |
+| `RTSP` | SETUP / RECORD / TEARDOWN / 命令通道 / keepalive |
+| `AIRPLAY` | 会话状态、资源、所有权、交接 |
+| `VIDEO` | 编码器、帧、CONFIG/IDR、码率、丢帧 |
+| `AUDIO` | 协商、SETUP、RTP 包、车机 sampleTime |
+| `CARLIFE` | CarLife 进程、端口、编码器协商、它的音频端口 |
+| `INPUT` | 双向触摸与硬键 |
+| `MEDIA` | 0x5000/0x5001、封面 |
+| `NETWORK` | Wi-Fi 关联、寻址、路由 |
+| `SESSION` | 会话生命周期 |
+| `PERF` | 周期计数：帧率、码率、缓冲 |
+| `APP` | 其余，以及旧版本没有通道的行 |
+
+### 导出包里多了两个视图
+
+同一个会话，ZIP 里现在有：
+
+- `timeline.txt` —— 全部通道按时间合并，格式对齐对照实现：
+  `[10:42:07.376] [5a22d0fa/B] [carplay-audio-send] [+1234ms] AUDIO: …`
+- `channel/audio.log`、`channel/iap.log`…… —— 同一批行的单通道视图
+
+原有的 `session.json` / `events.jsonl` 不变，JSONL 里新增 `channel` 和 `thread` 两个字段，`jq 'select(.channel=="AUDIO")'` 直接可用。
+
+### 每条日志带线程名
+
+一条会话里有十几个工作线程。线程名是判断「谁卡住了」最直接的证据，之前完全没有记录。
+
+### 会话开头加设备环境块
+
+版本、构建、CarLife 是否安装、通知使用权、蓝牙开关、已配对设备数、Wi-Fi 状态、机型、时区。这些以前要靠问。
+
+---
+
 ## 1.3.22 — 蓝牙交接 + 修掉音频档位的错误记忆
 
 三处。

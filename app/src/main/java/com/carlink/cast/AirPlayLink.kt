@@ -61,7 +61,10 @@ internal class AirPlayLink(
     private val bluetoothIdentity: () -> ByteArray?,
     /** Retires the Bluetooth iAP2 session after the Wi-Fi handoff. */
     private val onBluetoothRetire: (() -> Unit)? = null,
+    /** Session-level lines (lifecycle, handoff, teardown). */
     private val log: (String) -> Unit,
+    /** Per-subsystem lines; defaults keep older call sites compiling. */
+    private val logChannel: (LogChannel, String) -> Unit = { _, message -> log(message) },
     /**
      * Shared with the Bluetooth link, which subscribes first.
      *
@@ -129,7 +132,7 @@ internal class AirPlayLink(
             } catch (failure: Throwable) {
                 if (!closed.get()) {
                     failed.set(true)
-                    log("投屏会话失败：${failure.message ?: failure.javaClass.simpleName}")
+                    logChannel(LogChannel.SESSION, "投屏会话失败：${failure.message ?: failure.javaClass.simpleName}")
                     close()
                     onFailure(failure)
                 }
@@ -162,8 +165,8 @@ internal class AirPlayLink(
             transportId = identity.id,
             log = log,
         ))
-        runCatching { discovery.start() }.onFailure { log("Bonjour 启动失败：${it.message}") }
-        log("连接车机 AirPlay：${targets.first().remote.hostAddress}:$controlPort")
+        runCatching { discovery.start() }.onFailure { logChannel(LogChannel.NETWORK, "Bonjour 启动失败：${it.message}") }
+        logChannel(LogChannel.NETWORK, "连接车机 AirPlay：${targets.first().remote.hostAddress}:$controlPort")
         var receiver: InetAddress? = targets.first().remote
         var local: InetAddress? = targets.first().local
         val connect: (Int) -> Socket = { port ->
@@ -189,7 +192,7 @@ internal class AirPlayLink(
                 socket.close()
                 throw java.io.IOException("车机服务连接失败", lastFailure)
             }
-            log("车机 TCP 已固定：interface=${vehicle.link?.interfaceName}，" +
+            logChannel(LogChannel.NETWORK, "车机 TCP 已固定：interface=${vehicle.link?.interfaceName}，" +
                 "IPv6=${socket.localAddress is Inet6Address}，port=$port")
             socket
         }
@@ -201,7 +204,7 @@ internal class AirPlayLink(
             events = events(),
             savePair = { settings.savePair(peerAddress, it) },
             legacyAuthentication = { wire ->
-                log("车机使用旧版 MFiSAP 认证")
+                logChannel(LogChannel.RTSP, "车机使用旧版 MFiSAP 认证")
                 MfiController.authenticate(
                     { bytes -> wire.request("POST", "/auth-setup", bytes,
                         mapOf("Content-Type" to "application/octet-stream")).body },
@@ -220,11 +223,11 @@ internal class AirPlayLink(
             },
             audioProfileWorking = { profile ->
                 audioProfiles.recordWorking(profile)
-                log("车机音频档位已记忆：${profile.key}")
+                logChannel(LogChannel.AUDIO, "车机音频档位已记忆：${profile.key}")
             },
             audioProfileRejected = { profile ->
                 audioProfiles.recordRejected(profile)
-                log("车机音频档位已后置：${profile.key}（SETUP 后实际音频流未稳定）")
+                logChannel(LogChannel.AUDIO, "车机音频档位已后置：${profile.key}（SETUP 后实际音频流未稳定）")
             },
             // This must be the phone's own address on the vehicle network.
             // Passing the car's address here made NtpClock bind to a foreign
@@ -239,13 +242,14 @@ internal class AirPlayLink(
                 try {
                     channel.audio(bytes, sampleTimeUs)
                 } catch (error: Throwable) {
-                    log("音频来源交付失败：${error.message ?: error.javaClass.simpleName}，输入=${bytes.size}B，格式=${if (pcm) "PCM" else "AAC"}")
+                    logChannel(LogChannel.AUDIO, "音频来源交付失败：${error.message ?: error.javaClass.simpleName}，输入=${bytes.size}B，格式=${if (pcm) "PCM" else "AAC"}")
                 }
             }
-            override fun diagnostic(message: String) = log(message)
+            override fun diagnostic(message: String) =
+                logChannel(if (source is CarLifeProjectionAdapter) LogChannel.CARLIFE else LogChannel.VIDEO, message)
             override fun failed(error: Throwable) {
                 if (!closed.get()) {
-                    log("画面来源异常：${error.message ?: error.javaClass.simpleName}")
+                    logChannel(LogChannel.VIDEO, "画面来源异常：${error.message ?: error.javaClass.simpleName}")
                     close()
                 }
             }
@@ -254,7 +258,7 @@ internal class AirPlayLink(
         display = selected
         hid.setDisplay(selected)
         CastLog.display(selected.width, selected.height, selected.fps)
-        log("车机显示 ${selected.width}×${selected.height}@${selected.fps}")
+        logChannel(LogChannel.RTSP, "车机显示 ${selected.width}×${selected.height}@${selected.fps}")
         while (!closed.get()) {
             Thread.sleep(500)
             // The car's own Wi-Fi lease is the real lifeline. Once it is gone
@@ -266,7 +270,7 @@ internal class AirPlayLink(
             if (!bluetoothAlive()) {
                 if (wifiControlReady) {
                     if (bluetoothReleased.compareAndSet(false, true)) {
-                        log("车机已完成无线交接并释放蓝牙链路；会话继续走 Wi-Fi")
+                        logChannel(LogChannel.BT, "车机已完成无线交接并释放蓝牙链路；会话继续走 Wi-Fi")
                     }
                 } else {
                     throw IllegalStateException("蓝牙链路已断开，车机将重置会话")
@@ -283,7 +287,7 @@ internal class AirPlayLink(
         if (endpoint.addresses.isNotEmpty()) {
             val direct = vehicle.resolveTargets(endpoint.addresses)
             if (direct.isNotEmpty()) return direct
-            log("0x4301 地址与本机网络不匹配，改用 Bonjour 发现")
+            logChannel(LogChannel.NETWORK, "0x4301 地址与本机网络不匹配，改用 Bonjour 发现")
         }
         val network = checkNotNull(vehicle.network) { "车机网络尚未就绪" }
         AirPlayDiscovery(
@@ -295,7 +299,7 @@ internal class AirPlayLink(
             log = log,
         ).use { discovery ->
             runCatching { discovery.start() }
-                .onFailure { failure -> log("Bonjour 启动失败：${failure.message}") }
+                .onFailure { failure -> logChannel(LogChannel.NETWORK, "Bonjour 启动失败：${failure.message}") }
             val found = discovery.await()
                 ?: error("未发现车机 AirPlay 服务；请确认车机屏幕已进入 CarPlay")
             val targets = vehicle.resolveTargets(found.addresses.mapNotNull { address -> address.hostAddress })
@@ -323,10 +327,10 @@ internal class AirPlayLink(
                         "车机配对公钥已变化，请清除配对记录后重试"
                     }
                 }
-                log("使用已保存的车机配对身份")
+                logChannel(LogChannel.RTSP, "使用已保存的车机配对身份")
                 return pairing.verify(saved)
             } catch (failure: Exception) {
-                log("已保存配对失效（${failure.message}），重新配对")
+                logChannel(LogChannel.RTSP, "已保存配对失效（${failure.message}），重新配对")
                 settings.removePair(peerAddress)
             }
         }
@@ -337,7 +341,7 @@ internal class AirPlayLink(
 
     private fun handleControlMessage(runtime: Iap2Session, frame: Iap2Frame) {
         if (frame.messageId in setOf(0x6800, 0x6802, 0x6803)) {
-            log("Wi-Fi iAP2 HID 0x${frame.messageId.toString(16)} 长度=${frame.payload.size} " +
+            logChannel(LogChannel.INPUT, "Wi-Fi iAP2 HID 0x${frame.messageId.toString(16)} 长度=${frame.payload.size} " +
                 "hex=${frame.payload.joinToString(" ") { "%02X".format(it) }}")
             hid.handle(frame, runtime::send)
             return
@@ -345,11 +349,11 @@ internal class AirPlayLink(
         when (frame.messageId) {
             0x5000 -> {
                 nowPlayingSubscription = nowPlaying.subscribe(frame, runtime::send, runtime::sendFileTransfer)
-                log("Wi-Fi iAP2 0x5000：已开始真实 NowPlaying 发布")
+                logChannel(LogChannel.MEDIA, "Wi-Fi iAP2 0x5000：已开始真实 NowPlaying 发布")
             }
             0x5002 -> {
                 nowPlaying.unsubscribe(nowPlayingSubscription)
-                log("Wi-Fi iAP2 0x5002：已停止 NowPlaying 发布")
+                logChannel(LogChannel.MEDIA, "Wi-Fi iAP2 0x5002：已停止 NowPlaying 发布")
             }
             0x4157, 0x4154, 0x4170 -> {
                 Iap2SubscriptionReplies.forRequest(frame.messageId)?.let { reply ->
@@ -357,12 +361,31 @@ internal class AirPlayLink(
                     log("Wi-Fi iAP2 0x${frame.messageId.toString(16)}：已回复空闲订阅状态")
                 }
             }
-            else -> log("Wi-Fi 控制消息 0x${frame.messageId.toString(16)}")
+            else -> logChannel(LogChannel.IAP, "Wi-Fi 控制消息 0x${frame.messageId.toString(16)}")
         }
     }
 
     private fun events() = object : SenderEvents {
-        override fun diagnostic(message: String) = log(message)
+        override fun diagnostic(message: String) = logChannel(senderChannelFor(message), message)
+
+        /**
+         * Picks the channel for a sender diagnostic by its leading word.
+         *
+         * The sender produces one flat stream of human sentences; the
+         * prefixes it already uses ("音频", "视频", "会话快照", "RTSP")
+         * are a reliable enough signal to split them without threading
+         * a channel parameter through every call site in core-airplay.
+         */
+        private fun senderChannelFor(message: String): LogChannel = when {
+            message.startsWith("RECORD 心跳") || message.startsWith("全画布统计") -> LogChannel.PERF
+            message.startsWith("音频") || message.startsWith("第二条音频流") -> LogChannel.AUDIO
+            message.startsWith("视频") || message.startsWith("帧") -> LogChannel.VIDEO
+            message.startsWith("会话快照") || message.startsWith("会话") -> LogChannel.SESSION
+            message.startsWith("音箱") || message.startsWith("媒体") -> LogChannel.MEDIA
+            message.contains("RTSP") || message.contains("SETUP") ||
+                message.contains("RECORD") || message.contains("TEARDOWN") -> LogChannel.RTSP
+            else -> LogChannel.SESSION
+        }
 
         override fun outputDisplay(display: SenderDisplay): SenderDisplay {
             val carLife = source as? CarLifeProjectionAdapter ?: return display
@@ -390,7 +413,7 @@ internal class AirPlayLink(
             // its encoder is not started until the sender has completed RECORD.
             val requested = settings.frameRateOverride.takeIf { it > 0 } ?: display.fps
             if (requested != display.fps) {
-                log("帧率覆盖：车机声明 ${display.fps}fps，改用 ${requested}fps")
+                logChannel(LogChannel.VIDEO, "帧率覆盖：车机声明 ${display.fps}fps，改用 ${requested}fps")
             }
             CastLog.stage(CastStage.MEDIA, "车机显示 ${display.width}×${display.height}，准备画面")
             runBlocking {
@@ -431,10 +454,10 @@ internal class AirPlayLink(
             sourceScope.launch {
                 try {
                     source.startProjection(current::frame)
-                    log("屏幕 SETUP/RECORD 已完成，已启动画面编码器")
+                    logChannel(LogChannel.RTSP, "屏幕 SETUP/RECORD 已完成，已启动画面编码器")
                 } catch (error: Throwable) {
                     if (!closed.get()) {
-                        log("启动画面来源失败：${error.message ?: error.javaClass.simpleName}")
+                        logChannel(LogChannel.VIDEO, "启动画面来源失败：${error.message ?: error.javaClass.simpleName}")
                     }
                 }
             }
@@ -469,7 +492,7 @@ internal class AirPlayLink(
 
         override fun bluetoothControlAvailable(): Boolean {
             val alive = !closed.get() && bluetoothAlive()
-            log("蓝牙控制通道：可用=$alive")
+            logChannel(LogChannel.BT, "蓝牙控制通道：可用=$alive")
             return alive
         }
 
@@ -495,13 +518,13 @@ internal class AirPlayLink(
          */
         override fun handoffToWifi() {
             if (!bluetoothReleased.compareAndSet(false, true)) return
-            log(
+            logChannel(LogChannel.SESSION,
                 "RECORD 已完成：把控制权交给 Wi-Fi" +
                     "（蓝牙 iAP2=${if (bluetoothAlive()) "在线，准备退休" else "已不在"}，" +
                     "Wi-Fi 命令通道=${if (wifiCommand != null) "已同步" else "未建立"}）",
             )
             runCatching { onBluetoothRetire?.invoke() }
-                .onFailure { log("蓝牙控制会话退休失败：${it.message ?: it.javaClass.simpleName}") }
+                .onFailure { logChannel(LogChannel.BT, "蓝牙控制会话退休失败：${it.message ?: it.javaClass.simpleName}") }
         }
 
         override fun iapControl(stream: BlockingDuplexByteStream): CompletableFuture<Unit> {
@@ -518,14 +541,14 @@ internal class AirPlayLink(
                     val runtime = if ((stream as? com.carplay.sender.PhoneIapTunnel)?.isCommandTunnel == true) {
                         Iap2Session.commandTunnel(
                             stream,
-                            onTrace = { log("iAP2：$it") },
+                            onTrace = { logChannel(LogChannel.IAP, "iAP2：$it") },
                             onFileTransferDatagram = { datagram -> nowPlaying.onFileTransferDatagram(datagram) },
                             onLinkRestart = {
                                 // The car restarted its iAP2 link under us. The
                                 // session above believes it is still ready; tell
                                 // it to replay the whole bootstrap, or nothing
                                 // will ever speak on the new link.
-                                log("车机重启了 iAP2 链路：重新执行引导")
+                                logChannel(LogChannel.IAP, "车机重启了 iAP2 链路：重新执行引导")
                                 linkRestarted.set(true)
                                 restartSignal.countDown()
                             },
@@ -655,7 +678,7 @@ internal class AirPlayLink(
                             control.begin()
                             nextIdentifyRetry = Long.MAX_VALUE
                             val stage = control.status()
-                            log(
+                            logChannel(LogChannel.IAP,
                                 "Wi-Fi iAP2 引导：已发 0x1D00（模式=等待车机），之后不再主动发送；" +
                                     "identified=${stage.identified} authenticated=${stage.authenticated} " +
                                     "certificate=${stage.certificateReceived} 已收CSM=$csmReceived",
@@ -663,7 +686,7 @@ internal class AirPlayLink(
                         }
                         if (System.nanoTime() - lastReport >= TimeUnit.SECONDS.toNanos(5)) {
                             lastReport = System.nanoTime()
-                            log(
+                            logChannel(LogChannel.IAP,
                                 "命令通道 5 秒汇总：已发识别=$identifyRequested 已收CSM=$csmReceived " +
                                     "identified=${control.status().identified}",
                             )
@@ -691,10 +714,10 @@ internal class AirPlayLink(
                             if (length != null) {
                                 nextChallengeRetry = System.nanoTime() +
                                     TimeUnit.MILLISECONDS.toNanos(COMMAND_IAP_CHALLENGE_WINDOW_MILLIS)
-                                log("命令通道换挑战长度：${length}B，窗口 ${COMMAND_IAP_CHALLENGE_WINDOW_MILLIS}ms")
+                                logChannel(LogChannel.IAP, "命令通道换挑战长度：${length}B，窗口 ${COMMAND_IAP_CHALLENGE_WINDOW_MILLIS}ms")
                             } else {
                                 nextChallengeRetry = Long.MAX_VALUE
-                                log("命令通道挑战长度阶梯已走完，仍无 0xAA03")
+                                logChannel(LogChannel.IAP, "命令通道挑战长度阶梯已走完，仍无 0xAA03")
                             }
                         }
                         /*
@@ -750,20 +773,20 @@ internal class AirPlayLink(
                             identifyRequested++
                             control.begin()
                             nextIdentifyRetry = Long.MAX_VALUE
-                            log(
+                            logChannel(LogChannel.IAP,
                                 "车机重开了 iAP2 链路：清空协商状态并重发一次 0x1D00，" +
                                     "之后等待车机（推流中=${sender?.isStreaming() == true}）",
                             )
                         }
                         val frame = runtime.recv(1000) ?: continue
                         csmReceived++
-                        log("命令通道收到 CSM：0x${frame.messageId.toString(16)} " +
+                        logChannel(LogChannel.IAP, "命令通道收到 CSM：0x${frame.messageId.toString(16)} " +
                             "body=${frame.payload.size}B（本会话第 $csmReceived 条）")
                         control.receive(frame)
                         if (control.status().controlReady && !done.isDone) {
                             runtime.awaitOutboundAcknowledged(3000)
                             wifiControlReady = true
-                            log("Wi-Fi 控制通道独立验证完成；蓝牙链路保持连接")
+                            logChannel(LogChannel.IAP, "Wi-Fi 控制通道独立验证完成；蓝牙链路保持连接")
                             done.complete(Unit)
                             scheduleDefaultNowPlaying(runtime)
                         }
@@ -788,7 +811,7 @@ internal class AirPlayLink(
                 } catch (_: InterruptedException) {
                     // Session teardown owns the next state.
                 } catch (failure: Throwable) {
-                    if (!closed.get()) log("NowPlaying 默认订阅失败：${failure.message}")
+                    if (!closed.get()) logChannel(LogChannel.MEDIA, "NowPlaying 默认订阅失败：${failure.message}")
                 }
             }, "carlink-now-playing-fallback").apply { isDaemon = true; start() }
         }
@@ -796,7 +819,7 @@ internal class AirPlayLink(
         override fun failed(error: Throwable) {
             if (!closed.get() && failed.compareAndSet(false, true)) {
                 val detail = "${error.javaClass.simpleName}: ${error.message ?: "无消息"}"
-                log("AirPlay 会话异常：$detail")
+                logChannel(LogChannel.SESSION, "AirPlay 会话异常：$detail")
                 // The car dropped us, not the driver. Tell the source before the
                 // close below runs, so its teardown keeps the vendor process
                 // warm instead of paying a cold start on the next attempt.
@@ -824,13 +847,13 @@ internal class AirPlayLink(
         // interrupts its worker threads; doing it first can interrupt the
         // CarLife audio/compositor cleanup and skip releaseCarLife entirely.
         runCatching { runBlocking { source.stopProjection() } }
-            .onFailure { log("画面来源释放失败：${it.javaClass.simpleName}: ${it.message}") }
+            .onFailure { logChannel(LogChannel.VIDEO, "画面来源释放失败：${it.javaClass.simpleName}: ${it.message}") }
         runCatching { sender?.close() }
-            .onFailure { log("AirPlay 发送端关闭失败：${it.message}") }
+            .onFailure { logChannel(LogChannel.SESSION, "AirPlay 发送端关闭失败：${it.message}") }
         synchronized(resources) {
             resources.reversed().forEach { resource ->
                 runCatching { resource.close() }
-                    .onFailure { log("AirPlay 资源关闭失败：${it.message}") }
+                    .onFailure { logChannel(LogChannel.SESSION, "AirPlay 资源关闭失败：${it.message}") }
             }
             resources.clear()
         }
