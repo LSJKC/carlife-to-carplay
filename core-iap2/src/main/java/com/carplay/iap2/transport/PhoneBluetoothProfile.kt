@@ -29,15 +29,30 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
             acknowledgementTimeoutMillis = if (responder) 73 else 256,
             maxRetransmissions = 30,
             maxAcknowledgements = if (responder) 3 else 1,
+            /*
+             * The command tunnel declares the same two sessions the car does.
+             *
+             * It used to add a third, session 12 (file transfer), which the
+             * accessory never declares. The link layer accepts our SYN either
+             * way, so the difference is invisible in the handshake — but on the
+             * Wi-Fi command transport the car then answered *nothing* at the
+             * CSM layer for the life of the link. Field capture 2026-10-30,
+             * same car, same minute:
+             *
+             *   ours   SYN 29B, sessions=1,2,12 -> 0x1D00 sent, 0x1D01 never
+             *          arrives, `已收CSM=0` for 10 s, car sends LINK-RESTART
+             *   theirs SYN 16B, sessions=1,2   -> 0x1D01 arrives 26 ms later,
+             *          link stays up for 975 s with no restart
+             *
+             * `Iap2CsmChannel.fileTransferSessionId` binds to the declared
+             * override and falls back to 12 when none is present, so file
+             * transfer still addresses the same session without advertising
+             * it.
+             */
             sessions = when (this) {
-                ACCESSORY_FIRST, VIVO_ACCESSORY_FIRST -> listOf(
+                ACCESSORY_FIRST, VIVO_ACCESSORY_FIRST, COMMAND_TUNNEL -> listOf(
                     Iap2LinkEngine.SessionDescriptor(1, 0, 2),
                     Iap2LinkEngine.SessionDescriptor(2, 1, 2),
-                )
-                COMMAND_TUNNEL -> listOf(
-                    Iap2LinkEngine.SessionDescriptor(1, 0, 2),
-                    Iap2LinkEngine.SessionDescriptor(2, 1, 2),
-                    Iap2LinkEngine.SessionDescriptor(Iap2LinkEngine.FILE_TRANSFER_SESSION_ID, 1, 2),
                 )
                 else -> listOf(Iap2LinkEngine.SessionDescriptor(1, 0, 2))
             },

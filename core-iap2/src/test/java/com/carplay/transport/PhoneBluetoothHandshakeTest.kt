@@ -358,6 +358,37 @@ class PhoneBluetoothHandshakeTest {
         assertFalse(engine.writable())
     }
 
+    @Test fun commandTunnelAdvertisesTheSameSessionTableAsTheCar() {
+        /*
+         * The car declares exactly sessions 1 and 2. Adding a third (the old
+         * session-12 file-transfer entry) left the SYN accepted at the link
+         * layer while every CSM on that link was silently dropped — 0x1D00
+         * out, 0x1D01 never back, for the whole 13 s before the car reset the
+         * connection. This pins the session table to the car's shape.
+         */
+        val engine = Iap2LinkEngine(PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig())
+        engine.start(false, 0)
+        engine.feed(marker, 1)
+        engine.takeOutput()
+        val peer = Iap2LinkEngine.SynchronizationPayload(
+            maxOutgoing = 5,
+            maxLength = 65535,
+            retransmissionTimeoutMillis = 2000,
+            acknowledgementTimeoutMillis = 300,
+            maxRetransmissions = 3,
+            maxAcknowledgements = 3,
+            sessions = listOf(
+                Iap2LinkEngine.SessionDescriptor(1, 0, 2),
+                Iap2LinkEngine.SessionDescriptor(2, 1, 2),
+            ),
+        ).encode()
+        engine.feed(packet(0x80, 11, 0, 0, peer), 2)
+        val syn = engine.takeOutput()
+        // 1 start/type + 2 length + 1 control + 1 seq + 1 ack + 1 session
+        // + 2 payload length + 1 checksum = 10 bytes of packet plus payload.
+        assertEquals(9 + 16 + 1, syn.size)
+    }
+
     @Test fun commandTunnelIgnoresRepeatedDetectionMarkerAfterNormalHandshake() {
         val engine = Iap2LinkEngine(PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig())
         engine.start(false, 0)
@@ -372,7 +403,7 @@ class PhoneBluetoothHandshakeTest {
             maxAcknowledgements = 3,
             sessions = listOf(
                 Iap2LinkEngine.SessionDescriptor(1, 0, 2),
-                Iap2LinkEngine.SessionDescriptor(12, 1, 2),
+                Iap2LinkEngine.SessionDescriptor(2, 1, 2),
             ),
         ).encode()
         engine.feed(packet(0x80, 11, 0, 0, peer), 2)
