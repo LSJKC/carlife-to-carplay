@@ -99,6 +99,8 @@ class PhoneBootstrap(
     private var accessorySends: Set<Int> = emptySet()
     private var identification: Iap2Frame? = null
     private var lastReportedStatus: BootstrapStatus? = null
+    /** Index into [CHALLENGE_LENGTHS]; advanced by [retryChallengeWithNextLength]. */
+    private var challengeAttempt = 0
 
     /**
      * Starts (or resumes) the bootstrap in the order this transport expects.
@@ -138,6 +140,50 @@ class PhoneBootstrap(
      * method keeps the order the Bluetooth link needs.
      */
     fun begin() { onStage("识别车机"); send(empty(0x1d00)); reportStatus() }
+
+    /**
+     * Candidate challenge lengths, in the order they are tried.
+     *
+     * The first entry is decided by the certificate, not by preference: an EC
+     * (P-256) accessory signature verifies over exactly 32 bytes, so a shorter
+     * challenge is not an alternative to try — it cannot be verified at all.
+     * RSA leaves the length open, and 20 is the shape a real iPhone uses.
+     *
+     * The remaining entries exist only for the case where the car accepts the
+     * frame and then goes silent: a receiver that disliked the length is
+     * indistinguishable from one that ignored the exchange, and walking the
+     * candidates in one session is cheaper than a reconnect.
+     */
+    private fun challengeLadder(certificate: X509Certificate): IntArray = when (certificate.publicKey) {
+        is ECPublicKey -> intArrayOf(32)
+        else -> intArrayOf(20, 32, 16)
+    }
+    private var challengeLadder: IntArray = intArrayOf(32)
+
+    /**
+     * Re-send 0xAA02 with the next candidate challenge length.
+     *
+     * The car acknowledges the frame carrying the challenge and then stays
+     * silent, so the only signal that a length was wrong is the absence of
+     * 0xAA03. The caller's retry loop owns the timing; this just walks the
+     * candidates so a single session tries all of them instead of repeating
+     * the one the car is ignoring.
+     *
+     * Returns the length now on the wire, or null when the certificate has not
+     * arrived yet (nothing to challenge) or every candidate has been tried.
+     */
+    @Synchronized
+    fun retryChallengeWithNextLength(): Int? {
+        if (leaf == null || authenticated) return null
+        if (challengeAttempt >= challengeLadder.lastIndex) return null
+        challengeAttempt++
+        val size = challengeLadder[challengeAttempt]
+        challenge = ByteArray(size).also(SecureRandom()::nextBytes)
+        send(Iap2Messages.buildRaw(0xaa02) { bytes(0, challenge!!) })
+        onStage("换挑战长度重发：${size}B（第 ${challengeAttempt + 1} 档）")
+        reportStatus()
+        return size
+    }
 
     /**
      * Opens the way the reference sender opens after a link restart.
@@ -313,7 +359,27 @@ class PhoneBootstrap(
                 }
                 val trusted = validateCertificates(body.bytes(0))
                 leaf = trusted
-                challenge = ByteArray(if (trusted.publicKey is ECPublicKey) 32 else 20).also(SecureRandom()::nextBytes)
+                /*
+                 * The first challenge length is dictated by the key, not chosen.
+                 *
+                 * An EC (P-256) accessory signature verifies over exactly 32
+                 * bytes — `AccessoryTrust.verifyChallenge` requires it, and a
+                 * shorter nonce is not a weaker attempt but an unverifiable
+                 * one. The field measurements are consistent with that rather
+                 * than against it: on this car a 32-byte challenge is answered
+                 * with 0xAA03 in about 700 ms every time.
+                 *
+                 * What those same captures do show is the car accepting the
+                 * frame and then saying nothing at all until it resets the
+                 * connection. A receiver that disliked the length looks
+                 * identical to one that ignored the exchange, so
+                 * [retryChallengeWithNextLength] walks the candidates when the
+                 * caller's retry loop decides nothing is coming back. For EC
+                 * that ladder has one rung: there is nothing else to try.
+                 */
+                challengeLadder = challengeLadder(trusted)
+                challengeAttempt = 0
+                challenge = ByteArray(challengeLadder[0]).also(SecureRandom()::nextBytes)
                 send(Iap2Messages.buildRaw(0xaa02) { bytes(0, challenge!!) })
             }
             0xaa03 -> {
@@ -341,6 +407,18 @@ class PhoneBootstrap(
                     authenticated = true; challenge = null; send(empty(0xaa05))
                     // On the command channel authentication comes first, so the
                     // identification request is due now — and only now.
+                    /*
+                     * A command session does not publish on authentication.
+                     *
+                     * Publishing starts the wireless-configuration round —
+                     * 0x4300 availability and the endpoint notifications — and
+                     * this channel is a control session, not the accessory link
+                     * that negotiates CarPlay. It used to call `publish()` here
+                     * the moment a signature verified, which put a second round
+                     * of 0x4300 traffic on the wire while the Bluetooth link
+                     * was still running its own. Completing `controlReady` and
+                     * going quiet is what this transport is for.
+                     */
                     if (!identified) { onStage("识别车机"); send(empty(0x1d00)) }
                     else publish()
                 }
@@ -477,4 +555,6 @@ class PhoneBootstrap(
     private fun diagnostic(message: String) {
         try { onStage(message) } catch (_: Exception) { /* Capability diagnostics are observational only. */ }
     }
+
+    private companion object
 }

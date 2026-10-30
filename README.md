@@ -19,7 +19,7 @@
 
 | 版本 | 说明 |
 |---|---|
-| **[最新版](https://github.com/LSJKC/carlife-to-carplay/releases/latest)** | 推荐。当前 1.3.17 |
+| **[最新版](https://github.com/LSJKC/carlife-to-carplay/releases/latest)** | 推荐。当前 1.3.18 |
 | [全部版本](https://github.com/LSJKC/carlife-to-carplay/releases) | 1.3.0 起逐版 APK |
 | [CHANGELOG](CHANGELOG.md) | 每个版本改了什么、为什么改 |
 
@@ -215,21 +215,7 @@ AVC 编码器引用数与 fd 数量，并自动判读：
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.3.17**。
-
----
-
-## 参考
-
-协议字段与车机行为不是凭空推断的，依据来自三类公开材料：
-
-- **真机抓包** —— iPhone 在同型车机上的 `sysdiagnose`，提供 SETUP 参数、
-  端点性能基线与音频流的实际形状
-- **公开协议文档与抓包分析** —— iAP2 / AirPlay 的字段语义与流程
-- **车机自身的应答** —— `/info` 声明、`0x1d01` 能力清单、`/feedback` 回执，
-  这些是最终的判据
-
-代码为本项目独立实现。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.3.18**。
 
 ---
 

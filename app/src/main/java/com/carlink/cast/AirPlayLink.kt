@@ -516,8 +516,30 @@ internal class AirPlayLink(
                     )
                     control.begin()
                     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-                    var identifyRetries = 0
-                    var nextIdentifyRetry = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COMMAND_IAP_RETRY_MILLIS)
+                    /*
+                     * `begin()` above is the opening message, so the retry
+                     * block below must not send a second one.
+                     *
+                     * It used to start at 0 and fire 800 ms later, which put two
+                     * 0x1D00 frames on this channel in the first second of
+                     * every session — visible in the 2026-10-30 field capture at
+                     * 8168 ms and 9170 ms. The bootstrap's own contract is one
+                     * opening message and then silence; a duplicate is exactly
+                     * the unsolicited traffic that contract exists to avoid.
+                     */
+                    var identifyRetries = 1
+                    /*
+                     * No second opening message on a timer.
+                     *
+                     * `begin()` above already put 0x1D00 on the wire. Arming the
+                     * retry an interval later is what produced two identifications
+                     * in the first second of every session in the 2026-10-30 field
+                     * capture (8168 ms and 9170 ms). The bootstrap's contract — and
+                     * the argument written out at length below — is one opening
+                     * message and then silence, so the retry stays disarmed unless
+                     * something later re-arms it explicitly.
+                     */
+                    var nextIdentifyRetry = Long.MAX_VALUE
                     /*
                      * Counts what the car actually answers on this transport.
                      *
@@ -533,6 +555,20 @@ internal class AirPlayLink(
                     var csmReceived = 0
                     var identifyRequested = 0
                     var lastReport = System.nanoTime()
+                    /*
+                     * Challenge-length fallback.
+                     *
+                     * The Bluetooth link answers a 32-byte challenge on this
+                     * car in under a second, so 32 is right there. This channel
+                     * has produced no answer at all, and a receiver that goes
+                     * quiet after the certificate is exactly the symptom a
+                     * wrong candidate length produces. Each candidate gets its
+                     * own short window before the next one goes out; the ladder
+                     * is only walked while a certificate is held and no
+                     * signature has arrived.
+                     */
+                    var nextChallengeRetry = Long.MAX_VALUE
+                    var challengeWindowArmed = false
                     while (!closed.get()) {
                         if (!control.status().controlReady) {
                             check(System.nanoTime() < deadline) { "Wi-Fi iAP2 认证超时" }
@@ -590,6 +626,35 @@ internal class AirPlayLink(
                                 "命令通道 5 秒汇总：已发识别=$identifyRequested 已收CSM=$csmReceived " +
                                     "identified=${control.status().identified}",
                             )
+                        }
+                        /*
+                         * Certificate held, signature still missing: walk the
+                         * challenge-length ladder.
+                         *
+                         * `challengePending` is true only between 0xAA01 and
+                         * 0xAA03, which is the window where a receiver that
+                         * disliked the challenge length goes quiet. Nothing is
+                         * sent once it has answered.
+                         */
+                        val waitingForSignature = control.status().let {
+                            it.certificateReceived && it.challengePending && !it.authenticated
+                        }
+                        if (!waitingForSignature) {
+                            challengeWindowArmed = false
+                        } else if (!challengeWindowArmed) {
+                            challengeWindowArmed = true
+                            nextChallengeRetry = System.nanoTime() +
+                                TimeUnit.MILLISECONDS.toNanos(COMMAND_IAP_CHALLENGE_WINDOW_MILLIS)
+                        } else if (System.nanoTime() >= nextChallengeRetry) {
+                            val length = control.retryChallengeWithNextLength()
+                            if (length != null) {
+                                nextChallengeRetry = System.nanoTime() +
+                                    TimeUnit.MILLISECONDS.toNanos(COMMAND_IAP_CHALLENGE_WINDOW_MILLIS)
+                                log("命令通道换挑战长度：${length}B，窗口 ${COMMAND_IAP_CHALLENGE_WINDOW_MILLIS}ms")
+                            } else {
+                                nextChallengeRetry = Long.MAX_VALUE
+                                log("命令通道挑战长度阶梯已走完，仍无 0xAA03")
+                            }
                         }
                         /*
                          * The car restarted its iAP2 link.
@@ -737,28 +802,21 @@ internal class AirPlayLink(
 
     private companion object {
         /**
-         * Interval between bootstrap attempts on the Wi-Fi command channel.
-         *
-         * Has to fit inside the car's own post-restart window. The head unit
-         * reopens the iAP2 link about 10.2 s after RECORD and destroys the
-         * session 2.76-2.90 s later (three captures: 2764/2871/2898 ms). The
-         * previous 3 s interval was longer than that window, so any bootstrap
-         * driven by the timer instead of by the restart event could only ever
-         * arrive after the car had already decided to disconnect.
-         *
-         * 800 ms allows the link layer to finish its SYN/ACK exchange and still
-         * fits three attempts before the car's deadline.
-         */
-        const val COMMAND_IAP_RETRY_MILLIS = 800L
-
-        /**
          * How many bootstrap attempts a session may spend.
          *
-         * Sized so the attempts outlast the session instead of running out
-         * first: at 800 ms apart, 40 attempts cover 32 s, comfortably past the
-         * car's 13.1 s teardown. The old value of 3 was sized against a 3 s
-         * interval and could not reach the first link restart.
+         * The counter is only ever advanced by an explicit re-arm — the link
+         * restart below — so this is a ceiling on restarts handled, not a timer.
          */
         const val COMMAND_IAP_MAX_ATTEMPTS = 40
+
+        /**
+         * How long one challenge-length candidate gets before the next is sent.
+         *
+         * The Bluetooth link turns a 32-byte challenge into a 0xAA03 inside
+         * 700 ms on this car, so 3 s is four times the working round trip: long
+         * enough not to cut a slow answer short, short enough that the whole
+         * three-candidate ladder finishes well inside the 13.1 s teardown.
+         */
+        const val COMMAND_IAP_CHALLENGE_WINDOW_MILLIS = 3_000L
     }
 }
