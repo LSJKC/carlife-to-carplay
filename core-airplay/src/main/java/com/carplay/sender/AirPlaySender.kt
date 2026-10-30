@@ -241,6 +241,8 @@ class AirPlaySender(
     private var commandIapFailures = 0
     private var commandModes = false
     private var selectedAudio: SenderAudioFormat? = null
+    /** Guards [scheduleAudioReclaim] so one borrow starts one reclaim. */
+    private val audioReclaimRunning = java.util.concurrent.atomic.AtomicBoolean()
 
     /** The /info reply, kept so the companion SETUP can echo what this car declared. */
     @Volatile private var sessionInfo: Map<*, *> = emptyMap<Any, Any>()
@@ -2274,6 +2276,31 @@ class AirPlaySender(
                             else "车机收回了音频资源，暂停发送音频",
                         )
                         /*
+                         * Ask for the audio resource back.
+                         *
+                         * This car takes the media audio resource with
+                         * transferType=1 (owner and permanent both to the
+                         * accessory) when the driver switches the head unit's
+                         * source away from CarPlay, and then never sends
+                         * another changeModes. The field capture has exactly
+                         * one changeModes in the whole session —
+                         *
+                         *     +14001ms  resourceID=2, transferType=1 → 音频=车机
+                         *
+                         * — after which the audio packet counter freezes at
+                         * 440 and the driver has to reconnect to get sound
+                         * back, even after switching the source to CarPlay
+                         * again.
+                         *
+                         * A sender that keeps the resource cannot hand it back
+                         * on its own; one that asks for it again can. The
+                         * request is a plain modesChanged claiming audio for
+                         * the phone, retried a few times because the car is
+                         * busy with a source switch at that moment and may
+                         * not act on the first one.
+                         */
+                        if (!ownedAfter) scheduleAudioReclaim()
+                        /*
                          * Print what the car actually asked for, not only the
                          * outcome.
                          *
@@ -2509,6 +2536,50 @@ class AirPlaySender(
         }
     }
 
+    /**
+     * Re-claims the audio resource after the car borrowed it.
+     *
+     * Runs twice a few seconds apart: the car is mid source-switch when it takes
+     * the resource, so the first claim often lands while it is still busy. Both
+     * attempts are skipped once the car has already handed audio back on its
+     * own, and none of them run after the session closes.
+     */
+    private fun scheduleAudioReclaim() {
+        if (audioReclaimRunning.compareAndSet(false, true)) {
+            Thread({
+                try {
+                    for (delayMillis in AUDIO_RECLAIM_DELAYS_MS) {
+                        Thread.sleep(delayMillis)
+                        if (closed.get()) break
+                        if (modes.ownsAudio()) {
+                            events.diagnostic("音频资源已回到手机，不再重复索要")
+                            break
+                        }
+                        modes.audio(phone = true)
+                        runCatching {
+                            control?.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
+                        }.onSuccess {
+                            events.diagnostic("已重新索要音频资源（车机回到 CarPlay 音源时生效）：${it?.status ?: "无应答"}")
+                        }.onFailure {
+                            events.diagnostic("索要音频资源失败：${it.message ?: it.javaClass.simpleName}")
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                    // Session teardown interrupts this worker.
+                } catch (failure: Throwable) {
+                    // A reclaim that cannot be delivered must never fail the
+                    // session: [run] would call events.failed() for this, which
+                    // is why this worker owns its own thread.
+                    if (!closed.get()) {
+                        events.diagnostic("索要音频资源异常：${failure.message ?: failure.javaClass.simpleName}")
+                    }
+                } finally {
+                    audioReclaimRunning.set(false)
+                }
+            }, "carplay-audio-reclaim").apply { isDaemon = true; start() }
+        }
+    }
+
     override fun close() {
         if (!closed.get()) {
             runCatching { events.diagnostic(sessionSnapshot()) }
@@ -2664,6 +2735,16 @@ class AirPlaySender(
          * so 100 packets (about 2 s of AAC, 0.7 s of PCM) is the boundary.
          */
         private const val AUDIO_PROFILE_REJECT_MIN_PACKETS = 100L
+
+        /**
+         * Gaps between audio-resource reclaim attempts.
+         *
+         * The car takes the resource while it is switching its own audio
+         * source, so the first claim often arrives too early. Two attempts
+         * 2 s and 8 s after the borrow cover a normal source switch without
+         * pestering a car that simply wants the audio elsewhere.
+         */
+        private val AUDIO_RECLAIM_DELAYS_MS = longArrayOf(2_000L, 6_000L)
 
         /**
          * Scheduling lead for the screen stream — 对照实现's value.
