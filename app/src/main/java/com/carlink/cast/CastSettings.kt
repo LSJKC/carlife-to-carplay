@@ -102,21 +102,18 @@ class CastSettings(context: Context) {
         set(value) = prefs.edit().putInt(KEY_FRAME_RATE, value.coerceIn(0, 120)).apply()
 
     /**
-     * Extra blank columns inside the usable area, as a percentage of panel width.
+     * Video bitrate in Mbps for the compositor's re-encode.
      *
-     * The background still fills the whole panel; only the phone's own content
-     * is pulled inwards, together with the touch mapping. Some head units leave
-     * their own chrome on the left or right edge, and without this the outer
-     * few percent of the phone picture sit underneath it. 0-20%, matching the
-     * range this firmware accepts.
+     * 8 is the value that has been in every build so far and the value a
+     * sender that stays connected uses on this head unit, so it is the
+     * default. Lower trades sharpness for headroom on a congested link;
+     * higher spends bandwidth for detail. The encoder clamps whatever is
+     * asked to what the hardware actually supports, and the clamped value is
+     * logged, so a request the codec refuses is visible rather than silent.
      */
-    var safeLeftPercent: Int
-        get() = prefs.getInt(KEY_SAFE_LEFT, 0)
-        set(value) = prefs.edit().putInt(KEY_SAFE_LEFT, value.coerceIn(0, 20)).apply()
-
-    var safeRightPercent: Int
-        get() = prefs.getInt(KEY_SAFE_RIGHT, 0)
-        set(value) = prefs.edit().putInt(KEY_SAFE_RIGHT, value.coerceIn(0, 20)).apply()
+    var videoBitrateMbps: Int
+        get() = prefs.getInt(KEY_BITRATE_MBPS, 8)
+        set(value) = prefs.edit().putInt(KEY_BITRATE_MBPS, value.coerceIn(4, 24)).apply()
 
     /**
      * Render scale, as a percentage of the panel's native size.
@@ -178,8 +175,6 @@ class CastSettings(context: Context) {
             top = prefs.getInt("$scope:top", 0),
             right = prefs.getInt("$scope:right", 0),
             bottom = prefs.getInt("$scope:bottom", 0),
-            extraLeftPercent = safeLeftPercent,
-            extraRightPercent = safeRightPercent,
         )
     }
 
@@ -321,9 +316,8 @@ class CastSettings(context: Context) {
         const val KEY_AUTO_CONNECT = "autoConnect"
         const val KEY_CARLIFE_AUTO_SESSION = "carLifeAutoSession"
         const val KEY_FRAME_RATE = "frameRateOverride"
-    const val KEY_SAFE_LEFT = "safeLeftPercent"
-    const val KEY_SAFE_RIGHT = "safeRightPercent"
     const val KEY_DISPLAY_SCALE = "displayScalePercent"
+    const val KEY_BITRATE_MBPS = "videoBitrateMbps"
     const val KEY_TOUCH_THROTTLE = "touchMoveThrottleMs"
         const val KEY_SAFE_AREA_ENABLED = "safeAreaEnabled"
         const val KEY_VIDEO_PASSTHROUGH = "videoPassthrough"

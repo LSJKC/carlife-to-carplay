@@ -31,9 +31,6 @@ object CarPanelGeometry {
         val top: Int = 0,
         val right: Int = 0,
         val bottom: Int = 0,
-        /** Extra blank columns inside the usable area, as a percent of panel width. */
-        val extraLeftPercent: Int = 0,
-        val extraRightPercent: Int = 0,
     )
 
     enum class VideoLayout {
@@ -240,24 +237,9 @@ object CarPanelGeometry {
             )
             SafeAreaMode.OFF -> return null
         }
-        /*
-         * Extra blank columns the driver asked for, on top of whatever the
-         * car's own safe area already reserves.
-         *
-         * The background is painted across the whole panel regardless; this
-         * only pulls the phone's picture and its touch mapping inwards, which
-         * is what "左右安全留边" means on the reference UI. Capped at a third of
-         * the panel so a large percentage cannot collapse the viewport.
-         */
-        val extraLeft = (policy.extraLeftPercent.coerceIn(0, 20) * panel.panelWidth) / 100
-        val extraRight = (policy.extraRightPercent.coerceIn(0, 20) * panel.panelWidth) / 100
-        val cap = panel.panelWidth / 3
-        val leftMargin = margins.first + extraLeft.coerceAtMost(cap)
-        val rightMargin = margins.third + extraRight.coerceAtMost(cap)
-
-        val x = leftMargin
+        val x = margins.first
         val y = margins.second
-        val width = panel.panelWidth - leftMargin - rightMargin
+        val width = panel.panelWidth - margins.first - margins.third
         val height = panel.panelHeight - margins.second - margins.fourth
         if (width < MIN_VIEWPORT_WIDTH || height < MIN_VIEWPORT_HEIGHT) return null
         if (x < 0 || y < 0 || x + width > panel.panelWidth || y + height > panel.panelHeight) return null

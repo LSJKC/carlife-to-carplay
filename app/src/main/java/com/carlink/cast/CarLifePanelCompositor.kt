@@ -48,6 +48,15 @@ internal class CarLifePanelCompositor(
 
     private val lock = Object()
     @Volatile private var panel = initialPanel
+    /**
+     * Re-encode bitrate in bits per second.
+     *
+     * Set from the settings page before the encoder is configured. It stays a
+     * plain field rather than being read from SharedPreferences here so this
+     * class keeps no dependency on Android preference plumbing; the owner
+     * pushes the value in.
+     */
+    @Volatile private var requestedBitrate: Int = ENCODER_BIT_RATE
     @Volatile private var safeAreaPolicy = CarPanelGeometry.SafeAreaPolicy(enabled = true)
     private val frames = ArrayDeque<InputFrame>()
     private var pendingFormat: InputFormat? = null
@@ -106,6 +115,11 @@ internal class CarLifePanelCompositor(
     private var firstOutputFormatLogged = false
     private var outputConfigWarningLogged = false
     private var encoderStallWarningLogged = false
+
+    /** Sets the re-encode bitrate; takes effect the next time the encoder starts. */
+    fun updateBitrate(bitsPerSecond: Int) {
+        requestedBitrate = bitsPerSecond.coerceAtLeast(1)
+    }
 
     fun updatePanel(value: CarLifePanel) {
         check(!running.get()) { "不能在全画布合成期间修改 CarLife 面板" }
@@ -335,7 +349,7 @@ internal class CarLifePanelCompositor(
         log(
             "整屏合成已启动：输出 ${outputWidth}x$outputHeight@$outputFps，" +
                 "CarLife 区域 ${panel.safeWidth}x${panel.safeHeight}@(${panel.safeX},${panel.safeY})；" +
-                "二次编码 ${ENCODER_BIT_RATE / 1_000_000}Mbps，硬件编码器=${encoder?.name}",
+                "二次编码 ${requestedBitrate / 1_000_000}Mbps，硬件编码器=${encoder?.name}",
         )
         // Do not count a wallpaper-only frame as a successful CarLife session.
         drainEncoder()
@@ -444,8 +458,8 @@ internal class CarLifePanelCompositor(
         val range = MediaCodec.createEncoderByType(MIME_AVC)
             .codecInfo.getCapabilitiesForType(MIME_AVC)
             .videoCapabilities.bitrateRange
-        ENCODER_BIT_RATE.coerceIn(range.lower, range.upper)
-    }.getOrElse { ENCODER_BIT_RATE }
+        requestedBitrate.coerceIn(range.lower, range.upper)
+    }.getOrElse { requestedBitrate }
 
     private fun initializeEncoder() {
         fun buildFormat(bitrateMode: Int?): MediaFormat =
@@ -924,7 +938,7 @@ internal class CarLifePanelCompositor(
                  */
                 log(
                     "全画布编码器输出格式已就绪：$format\n" +
-                        "  请求参数：bitrate=${clampedBitrate()}（原设 $ENCODER_BIT_RATE）" +
+                        "  请求参数：bitrate=${clampedBitrate()}（原设 $requestedBitrate）" +
                         " fps=$outputFps gop=${keyFrameIntervalSeconds}s" +
                         " max-bframes=0 repeat-after=100ms",
                 )

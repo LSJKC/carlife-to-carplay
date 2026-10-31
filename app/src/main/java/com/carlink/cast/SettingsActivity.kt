@@ -2,6 +2,9 @@ package com.carlink.cast
 
 import android.content.Intent
 import android.os.Bundle
+import android.text.InputType
+import android.widget.EditText
+import android.widget.Toast
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -87,24 +90,20 @@ class SettingsActivity : AppCompatActivity() {
             "控制画面在车机上的大小与边距。改动在下次连接时生效。",
         ))
 
-        page.addView(slider(
-            title = "左侧安全留边",
-            detail = "在车机可用区域内再往右让出一点空白，避免被车机自己的图标挡住。背景仍然铺满整块屏。",
-            value = settings.safeLeftPercent,
-            min = 0,
-            max = 20,
-            suffix = "%",
-        ) { settings.safeLeftPercent = it })
-
-        page.addView(slider(
-            title = "右侧安全留边",
-            detail = "同上，作用在右侧。",
-            value = settings.safeRightPercent,
-            min = 0,
-            max = 20,
-            suffix = "%",
-        ) { settings.safeRightPercent = it })
-
+        /*
+         * The safe area is one setting, not two.
+         *
+         * A separate pair of percentage sliders used to sit here, added with
+         * the extra margins wired on top of the existing safe-area rectangle.
+         * That would have stacked two unrelated mechanisms: the car already
+         * declares where its own chrome sits (278 px on the left here), and a
+         * second percentage would have been added to it, making the slider feel
+         * violently sensitive for no visible reason.
+         *
+         * So this page edits the same policy the older sheet does — the same
+         * keys, the same pixel units — and the older sheet keeps working.
+         */
+        page.addView(safeAreaCard())
         page.addView(slider(
             title = "投屏清晰度",
             detail = "100% 是车机原生分辨率。调低画面更省性能但会变软，调高更清晰但更吃带宽。" +
@@ -114,6 +113,14 @@ class SettingsActivity : AppCompatActivity() {
             max = 160,
             suffix = "%",
         ) { settings.displayScalePercent = it })
+
+        page.addView(choiceRow(
+            title = "画面质量（码率）",
+            detail = "带宽换清晰度。8 Mbps 是默认，也是长期实测能稳住的值；" +
+                "无线环境好、画面复杂时可以往上调，网络拥挤时往下调能减少卡顿。",
+            options = listOf(4 to "4 Mbps", 8 to "8 Mbps", 12 to "12", 16 to "16", 24 to "24"),
+            current = settings.videoBitrateMbps,
+        ) { settings.videoBitrateMbps = it })
 
         page.addView(choiceRow(
             title = "目标帧率",
@@ -142,8 +149,9 @@ class SettingsActivity : AppCompatActivity() {
         ))
         page.addView(slider(
             title = "触摸响应间隔",
-            detail = "拖动手指时，两次上报之间至少隔这么久。设为 0 表示每一次都发。" +
-                "画面流畅但触摸跟不上时，适当调大。",
+            detail = "默认 0（关闭）。关闭时车机上的每一次移动都会原样送达，反应最跟手。" +
+                "只有当画面流畅但触摸明显滞后时才调大；它只影响拖动，按下和抬起永远立即送达，" +
+                "不会影响连接。",
             value = settings.touchMoveThrottleMs,
             min = 0,
             max = 48,
@@ -179,6 +187,103 @@ class SettingsActivity : AppCompatActivity() {
             style(10.5f, R.color.text_tertiary)
             setPadding(0, dp(18f), 0, 0)
         })
+    }
+
+    /**
+     * Pixel-exact safe area, matching how the older sheet already stores it.
+     *
+     * Pixels rather than percent: the car states its own safe rectangle in
+     * pixels, and a margin measured in the same unit is the one thing that can
+     * be compared with it directly. Typing `278` means 278 px, which is exactly
+     * what the car declares.
+     */
+    private fun safeAreaCard(): View {
+        val current = settings.safeAreaPolicy()
+        val box = card()
+        box.addView(TextView(this).apply {
+            text = "安全区留边"
+            style(14f, R.color.text_primary, bold = true)
+        })
+        box.addView(TextView(this).apply {
+            text = "手机画面可以占用的区域。车机自己声明的安全区会在这里自动填好；" +
+                "手动改动后以你填的为准。单位是像素，起点在面板左上角。"
+            style(11.5f, R.color.text_secondary)
+            setPadding(0, dp(4f), 0, dp(10f))
+            setLineSpacing(dp(3f).toFloat(), 1f)
+        })
+
+        val modes = listOf(
+            CarPanelGeometry.SafeAreaMode.STRICT to "跟随车机声明",
+            CarPanelGeometry.SafeAreaMode.CUSTOM to "手动填写",
+            CarPanelGeometry.SafeAreaMode.OFF to "关闭（铺满整屏）",
+        )
+        val modeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        modes.forEach { (mode, label) ->
+            val picked = mode == current.mode
+            modeRow.addView(TextView(this).apply {
+                text = label
+                style(12f, if (picked) R.color.on_accent else R.color.text_primary, bold = picked)
+                gravity = Gravity.CENTER
+                background = pill(if (picked) R.color.accent else R.color.surface_high)
+                isClickable = true
+                setOnClickListener {
+                    settings.saveSafeAreaPolicy(
+                        endpoint = settings.peerAddress,
+                        policy = current.copy(mode = mode),
+                    )
+                    recreate()
+                }
+            }, LinearLayout.LayoutParams(0, dp(38f), 1f).apply { marginEnd = dp(6f) })
+        }
+        box.addView(modeRow)
+
+        if (current.mode == CarPanelGeometry.SafeAreaMode.CUSTOM) {
+            val fields = listOf("左", "上", "右", "下")
+            val inputs = listOf(current.left, current.top, current.right, current.bottom)
+                .mapIndexed { index, value ->
+                    EditText(this).apply {
+                        hint = fields[index]
+                        inputType = InputType.TYPE_CLASS_NUMBER
+                        setSingleLine(true)
+                        setText(value.toString())
+                        setTextColor(color(R.color.text_primary))
+                        setHintTextColor(color(R.color.text_tertiary))
+                        backgroundTintList = android.content.res.ColorStateList.valueOf(color(R.color.accent))
+                    }
+                }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(10f), 0, 0)
+            }
+            inputs.forEach { field ->
+                row.addView(field, LinearLayout.LayoutParams(0, dp(52f), 1f).apply { marginEnd = dp(6f) })
+            }
+            box.addView(row)
+
+            box.addView(TextView(this).apply {
+                text = "保存"
+                style(13f, R.color.on_accent, bold = true)
+                gravity = Gravity.CENTER
+                background = pill(R.color.accent)
+                isClickable = true
+                setOnClickListener {
+                    fun read(field: EditText, fallback: Int) =
+                        field.text?.toString()?.trim()?.toIntOrNull() ?: fallback
+                    settings.saveSafeAreaPolicy(
+                        endpoint = settings.peerAddress,
+                        policy = current.copy(
+                            mode = CarPanelGeometry.SafeAreaMode.CUSTOM,
+                            left = read(inputs[0], current.left),
+                            top = read(inputs[1], current.top),
+                            right = read(inputs[2], current.right),
+                            bottom = read(inputs[3], current.bottom),
+                        ),
+                    )
+                    Toast.makeText(this@SettingsActivity, "已保存，下次连接生效", Toast.LENGTH_SHORT).show()
+                }
+            }, LinearLayout.LayoutParams(-1, dp(44f)).apply { topMargin = dp(10f) })
+        }
+        return box
     }
 
     // ---- widgets --------------------------------------------------------

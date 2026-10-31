@@ -396,6 +396,9 @@ internal class AirPlayLink(
             (carLife.videoProcessor as? CarLifePanelCompositor)?.let { compositor ->
                 compositor.updateSafeAreaPolicy(safeAreaPolicy)
                 compositor.updatePanel(panel)
+                // The encoder is configured after this callback, so the value
+                // set here is the one that takes effect for this session.
+                compositor.updateBitrate(settings.videoBitrateMbps * 1_000_000)
             }
             log(
                 "按车机主显示准备 CarLife 全画布：${display.width}x${display.height}" +
