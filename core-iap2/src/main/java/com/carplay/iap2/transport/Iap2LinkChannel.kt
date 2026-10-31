@@ -88,11 +88,6 @@ class Iap2LinkChannel private constructor(
     }
 
     /**
-     * Copies and queues one raw session-10 payload.  Returns false after close/termination or when
-     * the bounded command queue is full.  A peer LSP length violation is discovered by the worker
-     * when it reaches the engine and terminates the channel.
-     */
-    /**
      * Queues "start echoing repeated detection markers".
      *
      * The pump thread owns the engine, so the switch travels through the same

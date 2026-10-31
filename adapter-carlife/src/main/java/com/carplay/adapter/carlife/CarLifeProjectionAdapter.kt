@@ -1415,6 +1415,9 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * fail on a vendor ROM. Stopping our own connect request is the tidy path;
      * the background-process reclaim is the fallback that actually takes the
      * audio route back when CarLife ignores it.
+     *
+     * (1.3.45) This describes `releaseCarLife`, which is above. It used to be
+     * stacked directly on `detachForeignHost`, which it does not describe.
      */
     /**
      * Ends whatever host CarLife is currently bound to, so the startService
@@ -1425,6 +1428,9 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
      * stopped. Killing the vendor process is what resets it, and the process
      * has to be out of the foreground first for killBackgroundProcesses to act,
      * hence the stopService before it.
+     *
+     * (1.3.45) This describes `detachForeignHost`, which follows. It used to
+     * be stacked on `isCarLifeRunning`.
      */
     /**
      * Whether CarLife already has its command port open.

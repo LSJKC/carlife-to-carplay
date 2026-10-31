@@ -131,30 +131,7 @@ class PhoneBootstrap(
     /** True once 0x4301 has arrived in this session. */
     private var sessionEstablished = false
 
-    /**
-     * Starts (or resumes) the bootstrap in the order this transport expects.
-     *
-     * The Bluetooth link and the Wi-Fi command channel want opposite orders.
-     * Bluetooth goes identification-first: 0x1d00, and the car answers 0x1d01
-     * with its capabilities before any certificate is exchanged.
-     *
-     * The command channel is the other way round. That car-side runtime starts
-     * a control session by requesting authentication, and it ignores an
-     * identification request that arrives before the session is authenticated:
-     *
-     *     13:18:49.942  RX CSM 0xAA00            (car asks for authentication)
-     *     13:18:50.507  RX CSM 0xAA03            (signature over our challenge)
-     *     13:18:50.528  TX CSM 0xAA05            (we report success)
-     *     13:18:50.844  TX CSM 0x1D00            (only NOW)
-     *     13:18:50.942  RX CSM 0x1D01 parameters=47
-     *
-     * Sending 0x1d00 first on this transport produces no answer at all — every
-     * command-tunnel session up to 1.2.57 reached READY, sent 0x1d00, was never
-     * identified, retried on a 3s timer and had its control connection reset.
-     * That is why the link was disabled in 1.2.58 instead of being ordered
-     * correctly, and the car has been tearing the session down about thirteen
-     * seconds after its first command-channel link marker ever since.
-     */
+    
     /**
      * Starts (or resumes) the bootstrap.
      *

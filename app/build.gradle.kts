@@ -61,7 +61,7 @@ android {
         // made installing over an older build fail.
         versionCode = 345
         versionName = "1.3.45"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.45-345-full-sweep\"")
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.45-345-full-sweep-cleanup\"")
     }
 
     buildFeatures { buildConfig = true }

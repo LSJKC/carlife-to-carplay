@@ -329,6 +329,9 @@ class MainActivity : AppCompatActivity() {
      * discoverable position on a phone screen and the first thing that was
      * reported as unfriendly. A dock at the bottom puts every entry within
      * thumb reach and gives each one a label.
+     *
+     * (1.3.45) This describes `buildDock`, which is above. It used to sit
+     * directly on `buildFailureScreen`.
      */
     /** Last-resort screen: says what failed instead of vanishing. */
     private fun buildFailureScreen(failure: Throwable): View = ScrollView(this).apply {
@@ -370,7 +373,6 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-    /** A card holding one labelled control; the page supplies the control. */
     /**
      * A card with a title, an explanation, and room for one control.
      *
@@ -379,6 +381,9 @@ class MainActivity : AppCompatActivity() {
      * placed at (0,0) and they all draw on top of each other. That is exactly
      * what the settings page looked like — four lines of text stacked in the
      * same spot, unreadable.
+     *
+     * (1.3.45) This describes `settingCard`, which follows. It used to be
+     * stacked under a one-line summary of the same function.
      */
     /**
      * Builds a card and returns both the outer view and its content column.

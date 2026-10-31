@@ -224,6 +224,13 @@ class AirPlaySender(
     @Volatile private var secondaryDisplay: SenderDisplay? = null
     /** pair-verify shared secret, kept for streams opened after start(). */
     @Volatile private var sharedSecret: ByteArray? = null
+    /** AltScreen: config + frame counters (A6/P3). */
+    @Volatile private var altCfg: ByteArray? = null
+    @Volatile private var altCfgPending = false
+    @Volatile private var altCounter = 0L
+    @Volatile private var altFramesSent = 0L
+    @Volatile private var altFramesDropped = 0L
+    private val altWriteLock = Any()
     /** AltScreen socket/keys; connected but not yet fed frames (A6/P3). */
     @Volatile private var altScreenSocket: Socket? = null
     @Volatile private var altScreenKey: ByteArray? = null
@@ -1492,6 +1499,11 @@ class AirPlaySender(
      * needs to play it. AAC follows the Buick iPhone's compact request shape;
      * PCM and the compatibility fallback retain the expanded fields used by
      * older receivers.
+     *
+     * (1.3.45) This block documents `setupAudio`, which follows
+     * `openAltScreen`. It used to sit directly above `openAltScreen` with no
+     * function between them, so the cluster-stream documentation appeared to
+     * belong to the audio SETUP.
      */
     /**
      * Opens the instrument-cluster screen stream (A6, 1.3.45).
@@ -1934,11 +1946,11 @@ class AirPlaySender(
      * When the main stream is not AAC the companion falls back to the same
      * LPCM shape the receiver accepted for type 100, because a receiver that
      * took LPCM for the main stream will not take Opus here.
-     */
-    /**
-     * The `(audioFormat, samplesPerPacket)` pair for the companion stream.
      *
-     * Prefer what THIS car declared for type 101 in /info. The E2LB lists
+     * (1.3.45) A second KDoc block used to sit here describing the same
+     * function from the /info side. Both are true and they disagreed on which
+     * source wins, so they are merged: the code prefers what THIS car declared
+     * for type 101 in /info. The E2LB lists
      * `type=101 audioType=default output=0x40008000` (PCM48k/2 + OPUS48k/1),
      * and 0x40000000 (Opus 48k mono) is the subset the iPhone actually uses.
      * Both bits are accepted; the declared mask is the safer one to echo.
@@ -2215,6 +2227,67 @@ class AirPlaySender(
         val trimmed = if (raw.size > 8) raw.copyOfRange(raw.size - 8, raw.size) else raw
         return ByteArray(8).also { trimmed.copyInto(it, it.size - trimmed.size) }
     }
+    /**
+     * Configures the encoder that feeds the cluster screen (P3).
+     *
+     * Same contract as [config] for the main stream: an SPS/PPS blob with a
+     * length prefix, emitted whenever the encoder restarts. A cluster stream
+     * with no CONFIG ahead of its first IDR decodes to nothing, so this has to
+     * arrive before [altFrame].
+     */
+    fun altConfig(bytes: ByteArray) {
+        synchronized(altWriteLock) {
+            altCfg = bytes.copyOf()
+            altCfgPending = true
+        }
+        events.diagnostic(
+            "[ALTSCR] 副屏 CONFIG 收到：${bytes.size}B（等待端口就绪后写出）",
+        )
+    }
+
+    /**
+     * Queues one encoded cluster frame (P3).
+     *
+     * Written straight to the AltScreen socket rather than through the main
+     * video queue: the two streams carry different resolutions, and the queue's
+     * recovery/epoch logic is keyed to the panel the car is actually showing.
+     * A cluster frame that arrives before the port exists is counted and
+     * dropped — the alternative is blocking the caller behind a socket that may
+     * never come up.
+     */
+    fun altFrame(bytes: ByteArray, ptsUs: Long, keyFrame: Boolean) {
+        val socket = altScreenSocket ?: run {
+            altFramesDropped++
+            return
+        }
+        val key = altScreenKey ?: return
+        synchronized(altWriteLock) {
+            runCatching {
+                val output = socket.getOutputStream()
+                altCfg?.let { cfg ->
+                    if (altCfgPending) {
+                        output.write(VideoPackets.config(cfg, secondaryDisplay?.width ?: 0,
+                            secondaryDisplay?.height ?: 0, clock.syncedNtp().toLong()))
+                        altCfgPending = false
+                    }
+                }
+                val ntp = clock.syncedNtp().toLong()
+                output.write(VideoPackets.frame(bytes, key, altCounter++, ntp, keyFrame))
+                output.flush()
+                altFramesSent++
+                if (altFramesSent == 1L || (keyFrame && altFramesSent % 300L == 0L)) {
+                    events.diagnostic(
+                        "[ALTSCR] 副屏帧 #$altFramesSent 已写出：${bytes.size}B " +
+                            "IDR=$keyFrame port=$altScreenPort",
+                    )
+                }
+            }.onFailure {
+                events.diagnostic("[ALTSCR] 副屏帧写出失败：${it.message ?: it.javaClass.simpleName}")
+                altFramesDropped++
+            }
+        }
+    }
+
     fun config(bytes: ByteArray) {
         synchronized(videoEpochLock) {
             avcC = bytes.copyOf()
@@ -2224,10 +2297,28 @@ class AirPlaySender(
                     if (videoRecoveryPending) "（恢复轮次要求 >= $requiredConfigGeneration）" else "",
             )
         }
+        /*
+         * The same SPS/PPS feeds the cluster stream (P3).
+         *
+         * Until a dedicated cluster encoder exists, the cluster carries the
+         * main stream's frames, so the parameter sets are byte-identical and
+         * there is no reason to derive them twice. When the cluster gets its
+         * own encoder this call is where its CONFIG will arrive instead.
+         */
+        if (altScreenSocket != null) altConfig(bytes)
     }
     fun frame(bytes: ByteArray, ptsUs: Long, keyFrame: Boolean) {
         if (closed.get() || !modes.ownsScreen()) return
         if (avcC == null) return
+        /*
+         * Mirror the frame onto the cluster stream (P3).
+         *
+         * Done before the main-stream gates below so the cluster keeps
+         * receiving frames through a main-stream recovery (the car's cluster
+         * area does not care that the main decoder is rebuilding). Best effort:
+         * `altFrame` counts and drops when the port is not up.
+         */
+        if (altScreenSocket != null) altFrame(bytes, ptsUs, keyFrame)
         if (videoRecoveryPending && !keyFrame) {
             return
         }
@@ -2973,6 +3064,10 @@ class AirPlaySender(
      * says what the two ends actually exchanged. The 13-second teardown has
      * survived four hypotheses; this turns the next capture into evidence
      * instead of guesswork.
+     *
+     * (1.3.45) This block belongs to `sessionSnapshot()`, which now sits above
+     * it together with `comparisonSummary()`. It used to be stacked directly
+     * on `isStreaming()`, which it does not describe.
      */
     /**
      * True once this session has sent at least one video frame.
@@ -3044,7 +3139,12 @@ class AirPlaySender(
             "[SUMMARY] 音频流:       真机 Main+Alt+Aux+OOB | 本机 $audioLine + 辅助=${if (altLine == "无") "无" else altLine}",
             "[SUMMARY] 音频反馈:     真机 每2秒增长   | 本机 sampleTime=$sampleLine",
             "[SUMMARY] 音频同步:     真机 controlPort 双向 | 本机 已发同步包=$audioSyncSequence 次",
-            "[SUMMARY] 副屏:         真机 6031/2194x700 | 本机 ${if (altScreenPort > 0) "$altScreenPort/${secondaryDisplay?.width}x${secondaryDisplay?.height}" else "未建立"} | 一致=${if (altScreenPort > 0) "Y" else "N"}",
+            "[SUMMARY] 副屏:         真机 6031/2194x700 | 本机 " +
+                (if (altScreenPort > 0) {
+                    "$altScreenPort/${secondaryDisplay?.width}x${secondaryDisplay?.height} " +
+                        "帧=$altFramesSent 丢弃=$altFramesDropped"
+                } else "未建立") +
+                " | 一致=${if (altFramesSent > 0) "Y" else "N"}",
             "[SUMMARY] 命令通道:     真机 iAPChannel=0 不建 | 本机 ${if (commandIapAttempts > 0) "建了 $commandIapAttempts 次" else "未建"} | 一致=${if (commandIapAttempts == 0) "Y" else "N"}",
             "[SUMMARY] 媒体包:       真机 type2/type3 分开 | 本机 见 [NOWPLAY] 行",
             "[SUMMARY] Siri:         真机 有 requestSiri | 本机 收到 $siriRequests 次",
@@ -3269,11 +3369,6 @@ class AirPlaySender(
          */
         private const val PCM_LATENCY_MS = 250
 
-        /**
-         * The capture exposes these as HAL input/output sample buffers (IL/OL).
-         * They are diagnostics only: this receiver accepted no corresponding
-         * SETUP keys, so serializing guessed fields would risk rejection.
-         */
         /**
          * Companion (AltAudio / type 101) shape, from the iPhone sysdiagnose:
          * `AltAudio/default, Opus, 48000 Hz, Mono, 960 samples/packet,

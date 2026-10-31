@@ -402,7 +402,7 @@ replyStreams.firstOrNull { number(it["type"]) == format.streamType }
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
 | **A6** | 建立 AltScreen 流（端口 6031，2194×700） | ✅ 1.3.45 | **P1** |
-| P3 | 推 CarLife 副屏画面 or 自定义媒体卡到 AltScreen | ⚠️ 部分：1.3.45 已建立流并连端口，帧推送未启用 | P1 |
+| P3 | 推 CarLife 副屏画面 or 自定义媒体卡到 AltScreen | ✅ 1.3.45：主屏帧同时写入副屏流 | P1 |
 
 ---
 
@@ -961,7 +961,7 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 | SETUP 匹配 | A7' | ✅ | 删 `dataPort` 兜底，只按 `streamType` 精确匹配，日志 `[AUDIO] SETUP 回包` |
 | 比特率 | C4 | ✅ | 加 `[AUDIO] 比特率基准` 日志（真机 256000/96000） |
 | 副屏 | A6 | ✅ | `openAltScreen` type=111，日志 `[ALTSCR]` |
-| 副屏推送 | P3 | ⚠️ | 流已建立+端口已连，帧推送未启用（编码器只出主屏画面） |
+| 副屏推送 | P3 | ✅ | `altConfig`/`altFrame`，主屏 CONFIG 与帧同时写副屏；日志 `[ALTSCR]` |
 | HID 注册 | D1 | ✅ | `BluetoothBootstrap` `0x6800` 分支加 `[HID]` 日志与 `hidStartSeen` |
 | supportedCommands | D2 | ✅ | 新增命令分支，日志 `[HID] supportedCommands` |
 | 硬键路由 | D3 | ✅ | `CarLifeProjectionAdapter` 接入 `CarLifeBridge.mediaKeyDispatcher` |
@@ -973,7 +973,7 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 | Duck | J1 | ✅ | `duckAudio` 分支，日志 `[VOL]` |
 | 电话 | G2 | ⚠️ | `0x4154/0x4157` 应答 + `[CALL]` 探测，不提供状态 |
 
-**总计：21 条完整实现，6 条探测就位（无数据源，明天看日志再定），1 条部分（P3）。**
+**总计：22 条完整实现，8 条探测就位（无数据源，明天看日志再定）。**
 
 ### 新增日志模块名（供 grep）
 
@@ -994,9 +994,31 @@ NAV  CARLIFE-NAVI  SIRI  VOL  CALL  CLUSTER  SUMMARY
   `CarPlaySize` `ClusterTurnCardOverlay`
 - 删除死字段 `audioSuppressed` / `audioSsrc`
 - 修正 2 处高危险矛盾注释（CarLife AUTHEN_RESULT / type-130）
-- **未做**：50 个接收端/USB 文件的整批删除——尝试后发现互相依赖成环，
-  一刀切会导致 `Bytes.kt`/`SafeArea.kt` 等公共依赖一起断掉，
-  需要按依赖图分层删除，留到后续单独处理。
+**已删除 44 个不可达文件**（按依赖分层推进，每层删完即编译验证）：
+
+接收端整套（core-airplay/airplay）：
+`AirPlaySession` `AirPlayInfoPlist` `AirPlayConfig` `AirPlayHid` `PairSetup` `PairVerify`
+`PairingStore` `MfiSapAuthSetup` `RtspMessage` `ScreenStream` `AudioStream`
+`BufferedAudioStream` `IapTunnel` `VideoSettingsChannel` `VideoInCar`
+`CarPlayClusterDisplay` `AudioPacketCapture` `AirPlayIdentity` `AirPlayControlDiagnostics`
+`AirPlayPeerDiagnostics` `AirPlayTcpAccepted` `AirPlayDisplaySettings`
+`AirPlayIapTunnelStream` `CarPlayMediaEngine` `MicrophonePacketizer` `StreamReceiveStats`
+`SafeArea` `media/TouchLatencyProbe` `network/TcpLiveness`
+
+USB/有线整套（core-iap2）：`IphoneUsbHost` `Iap2UsbMuxHost` `UsbMuxFrameBuffer`
+`UsbReadQueuePolicy` `UsbRequestQueue` `IphoneCarPlayConfiguration` `Ch341DeviceMatcher`
+`I2cTransport` `Iap2ControlDeadline` `Iap2IdentificationClient` `Iap2WiredControlClient`
+`Iap2WirelessControlClient` `Iap2LocationClient` `Iap2VehicleStatus`
+`mfi/MfiAuthenticationClient` `mfi/Iap2MfiAuthenticationClient`
+
+以及 6 个零引用文件与 9 个测已删代码的测试文件。
+
+**保留**：`AudioCodecKind` 与 plist 无符号整数helper被生产代码使用，
+已迁到新文件 `PlistShared.kt`，不属于接收端。
+
+**H2 注释修正：13 处全部完成**——
+2 处高危险矛盾（CarLife AUTHEN_RESULT / type-130）、
+11 处堆叠错位 KDoc（描述的函数已不存在或挂在错误函数上）。
 
 ---
 

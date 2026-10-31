@@ -254,6 +254,9 @@ object CarPanelGeometry {
      * Unlike a plain "cover" this does not crop the source: the rectangle is
      * allowed to be bigger than the outer one, and the panel bounds decide how
      * far that is allowed to go.
+     *
+     * (1.3.45) This describes `containSource`, which follows. The block above
+     * it documents a crop helper that no longer exists.
      */
     /**
      * Scales the whole source frame into [outerWidth] x [outerHeight],

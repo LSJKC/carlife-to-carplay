@@ -683,18 +683,13 @@ internal class CarLifeSession(
     fun key(keyCode: Int) = sendTouch(CarLifeProtocol.MSG_TOUCH_CAR_HARD_KEY_CODE, CarLifeProto.hardKey(keyCode))
 
     /**
-     * Forces CarLife to hand out a fresh independently decodable frame.
-     *
-     * CarLife configures its encoder with `i-frame-interval: 0`, so it only
-     * emits an IDR at startup; there is no protocol message that asks for one.
-     * The pair the real head unit sends when the driver comes back to CarPlay
-     * is PAUSE then START: CarLife marks the stream paused, and on START it sets
-     * `setNeedDropFrame(true)` and drops output until the encoder produces a new
-     * I-frame. Without this the car restarted its decoder mid-GOP and showed the
-     * background only.
-     */
-    /**
      * Forces CarLife to hand out a fresh SPS/PPS + IDR.
+     *
+     * (1.3.45) Two KDoc blocks used to sit here and they contradicted each
+     * other: the first described PAUSE-then-START as the head unit's own way of
+     * requesting a key frame, the second said it must never be used. The second
+     * is the one that matches the code below and the field evidence — the first
+     * has been removed so the next reader is not left to pick one.
      *
      * PAUSE then START does **not** work here and must never be used to request
      * a key frame. On START CarLife runs `Recorder.resumeFromHeadUnit()`, which
