@@ -199,9 +199,14 @@ class AirPlaySender(
      * between "packets arrive" and "sound comes out".
      */
     private val pcmBase = SecureRandom().nextInt(0x4000_0000)
-    /** Set once, so a lost audio grant is reported once instead of per packet. */
-    private var audioSuppressed = false
     private var audioPacketsSent = 0L
+    /** Samples pushed into the main audio stream; compared with the car's sampleTime (L-A). */
+    @Volatile private var audioSamplesSent = 0L
+    /** Every audio data port this session opened, for the summary table (L-F). */
+    private val audioPorts = java.util.Collections.synchronizedList(mutableListOf<Int>())
+    /** RECORD completion and close times, for the disconnect interval (L-F). */
+    @Volatile private var recordedAtMillis = 0L
+    @Volatile private var closedAtMillis = 0L
     private var pcmChunks = 0L
     private var pcmCarryDropped = 0L
 
@@ -215,12 +220,24 @@ class AirPlaySender(
     /** /feedback requests written; diagnostics only. */
     @Volatile private var feedbackCount = 0L
     @Volatile private var lastFeedbackReportAt = 0L
+    /** Secondary display declared by the car, if any (A6). */
+    @Volatile private var secondaryDisplay: SenderDisplay? = null
+    /** pair-verify shared secret, kept for streams opened after start(). */
+    @Volatile private var sharedSecret: ByteArray? = null
+    /** AltScreen socket/keys; connected but not yet fed frames (A6/P3). */
+    @Volatile private var altScreenSocket: Socket? = null
+    @Volatile private var altScreenKey: ByteArray? = null
+    /** AltScreen stream state; diagnostics only. */
+    @Volatile private var altScreenPort: Int = 0
+    /** `requestSiri` commands received; diagnostics only. */
+    @Volatile private var siriRequests = 0L
+    /** `DuckCommand` commands received (navigation voice ducking); diagnostics only. */
+    @Volatile private var duckCommands = 0L
 
     @Volatile private var lastAudioTimestamp: Long? = null
     @Volatile private var nextAudioTimestamp: Long? = null
     @Volatile private var audioSyncSequence = 0
     private var aacTimestampClock: MonotonicAudioTimestamp? = null
-    private val audioSsrc = SecureRandom().nextInt()
     private var workers = mutableListOf<Thread>()
     private val touchDevices = mutableMapOf<String,HidInput>()
     private val keyDevices = mutableMapOf<String,HidKeys>()
@@ -304,6 +321,37 @@ class AirPlaySender(
      */
     private fun ensureCommandIap(): PhoneIapTunnel? {
         val wire = control ?: return null
+        /*
+         * Do not build a Wi-Fi iAP2 session when the car does not offer one
+         * (B1, 1.3.45).
+         *
+         * A real iPhone on this car reports `iAPChannel = 0` in the AirPlay
+         * feature handshake (2026-10-31 07:58:22.053) and then runs iAP2 only
+         * over Bluetooth: one identification, 8 ms, `Identification state
+         * changed: 1 → 2 → 6`. It never opens a second iAP2 session on the
+         * Wi-Fi command channel.
+         *
+         * This build did, because 1.2.78's gate was removed on the theory that
+         * the marker echo needed a link. What that produced in the field is the
+         * "jumps back to step 6" behaviour: every marker from the car built a
+         * fresh command-channel iAP2 session, which re-ran identification and
+         * authentication so the UI fell back to the verification stage, then
+         * that session failed (`已发识别=0 已收CSM=0 identified=false`) about
+         * ten seconds later, and the cycle repeated until the car reset.
+         *
+         * The marker itself still has to be answered — that is what keeps the
+         * session alive — but it belongs on the Bluetooth link, which already
+         * carries the only authenticated iAP2 session this car wants.
+         */
+        if (!carEnablesIapChannel) {
+            if (reportedCommands.add("iAPChannelOff")) {
+                events.diagnostic(
+                    "[IAP-CMD] 车机 iAPChannel=0 → 不建立 Wi-Fi iAP2 会话，" +
+                        "检测包只在蓝牙链路处理（依据 2026-10-31 07:58:22.053 真机）",
+                )
+            }
+            return null
+        }
         synchronized(iapLock) {
             if (closed.get()) return null
             // A tunnel that has already failed must not be handed out again:
@@ -337,16 +385,21 @@ class AirPlaySender(
             earlyIapBytes = 0
             val ready = events.iapControl(tunnel)
             events.diagnostic(
-                "车机通过 Wi-Fi 命令通道发起 iAP2；已建立命令链路（第 $commandIapAttempts 次）",
+                "[IAP-CMD] 车机声明 iAPChannel=1，建立 Wi-Fi iAP2 会话（第 $commandIapAttempts 次）",
             )
             ready.whenComplete { _, error ->
                 synchronized(iapLock) {
                     commandIapStarting = false
                     if (error != null) {
-                        events.diagnostic("Wi-Fi 命令通道 iAP2 认证未完成：${error.message ?: error.javaClass.simpleName}")
+                        events.diagnostic(
+                            "[IAP-CMD] Wi-Fi 命令通道 iAP2 认证未完成（第 $commandIapFailures 次失败）：" +
+                                "${error.message ?: error.javaClass.simpleName}",
+                        )
                         commandIapFailures++
                         // Drop the dead tunnel so the next marker starts afresh.
                         if (iap === tunnel) iap = null
+                    } else {
+                        events.diagnostic("[IAP-CMD] Wi-Fi 命令通道 iAP2 认证通过")
                     }
                 }
             }
@@ -478,6 +531,7 @@ class AirPlaySender(
         // Skipping it made the car reset the whole session the moment the
         // event port was dialled.
         val shared = pair(pairing)
+        sharedSecret = shared
         fun key(salt: String, label: String) = AirPlayCrypto.hkdfSha512(shared, salt.toByteArray(), label.toByteArray())
         wire.cipher = ControlCipher(key("Control-Salt", "Control-Read-Encryption-Key"), key("Control-Salt", "Control-Write-Encryption-Key"))
         val timingPort = clock.listen(); resources += clock
@@ -675,6 +729,66 @@ class AirPlaySender(
                     "${display["heightPixels"]}（uuid=${display["uuid"]}）",
             )
         }
+        /*
+         * Remember the *other* display, if any (A6).
+         *
+         * The real iPhone on this car opens two screen streams, in this order
+         * (2026-10-31):
+         *
+         *     07:58:22.304  created screen stream 0xC97A  (2194x700)   ← cluster
+         *     07:58:22.406  Registering streamType AltScreen, connectionID 6968160955815185368
+         *     07:58:22.441  [0xC97A] remote screen port: 6031
+         *     07:58:23.542  created screen stream 0xE123  (1972x520)   ← main
+         *     07:58:23.542  Registering streamType MainScreen, connectionID 13164771601038066357
+         *     07:58:23.542  [0xE123] remote screen port: 6030
+         *
+         * The cluster stream is opened roughly a second *before* the main one
+         * and on its own port. This build only ever opened the main stream, so
+         * the instrument-cluster area stayed empty.
+         *
+         * The secondary display is only recorded here; the stream itself is
+         * opened later, after the main screen is up, so a slow cluster SETUP
+         * cannot delay the screen watchdog.
+         */
+        val secondary = usable.firstOrNull { it !== display }
+        if (secondary != null) {
+            events.diagnostic(
+                "[ALTSCR] 发现副屏：${secondary["widthPixels"]}x${secondary["heightPixels"]}" +
+                    " uuid=${secondary["uuid"]} maxFPS=${secondary["maxFPS"]}" +
+                    "（真机 AltScreen 端口 6031，先于主屏 1.1 秒建立）",
+            )
+            secondaryDisplay = SenderDisplay(
+                number(secondary["widthPixels"]),
+                number(secondary["heightPixels"]),
+                (secondary["maxFPS"] as? Number)?.toInt()?.coerceIn(1, 60) ?: 30,
+                secondary["uuid"] as? String,
+            )
+        } else {
+            events.diagnostic("[ALTSCR] 车机只声明了一个显示项，不建立副屏流")
+        }
+        /*
+         * Cluster URL probe ([CLUSTER]).
+         *
+         * The real iPhone is asked for these by the car (2026-10-31 07:58:22.062):
+         *
+         *     Fetching Cluster Urls: [
+         *         "maps:/car/instrumentcluster/map",
+         *         "maps:/car/instrumentcluster/instructioncard",
+         *         "maps:/car/instrumentcluster" ]
+         *     07:58:22.053  clusterControlChannel = 0
+         *     07:58:22.320  Listening for cluster URL update notifications
+         *
+         * That list arrives over the AirPlay feature handshake, not over iAP2,
+         * and `clusterControlChannel = 0` means the car offers no way to switch
+         * the cluster's content by command — the phone just pushes frames into
+         * the AltScreen stream. Reproducing the map/instruction-card *pages*
+         * would mean rendering those URLs; pushing our own frames into the same
+         * stream does not need them.
+         */
+        events.diagnostic(
+            "[CLUSTER] 副屏内容由画面流驱动（真机 clusterControlChannel=0，无命令通道）；" +
+                "真机 URL 列表=maps:/car/instrumentcluster/{map,instructioncard,\"\"}",
+        )
         val area = selectedViewArea(display)
         val safeArea = selectedSafeArea(display, area)
         val negotiated = SenderDisplay(
@@ -762,22 +876,27 @@ class AirPlaySender(
          *         && !ownSourceVersion.equals("450.14") && !isUuid(mac)) return false;
          *     return true;
          *
-         * This head unit declares `sourceVersion="450.14"` (1.3.7 field log,
-         * `车机协议版本声明：sourceVersion="450.14"`), so `M()` is true and the
-         * 130 is never sent on this car. That is why the sender observed staying
-         * connected for 110 s has no type-130 stream on the wire.
+         * Correction (1.3.45): the paragraph that used to sit here described the
+         * absent type-130 SETUP as a property of the car. It is not. The line
+         * immediately below hardcodes `iapReply` to an empty map, and
+         * `SenderNegotiation.control(emptyMap)` returns `AUTHENTICATED_BLUETOOTH`
+         * for every input — so the WIFI_DATASTREAM and WIFI_COMMAND branches
+         * below are unreachable no matter what the handshake contains.
          *
-         * Our own 130 attempts were answered with a 200 and an empty body, which
-         * looks like acceptance but is not: measured from RECORD, the control
-         * connection was destroyed 13.09-13.16 s later in every capture.
+         * Reading that as "this car never sends 130" hid a hard-coded decision
+         * behind an observation. What is actually true of this car, measured on
+         * 2026-10-31, is separate and still holds:
          *
-         * SETUP on this car is exactly one screen stream:
-         *
-         *   SETUP streams=[{type:110, ...}]  (+ optional 101/100 audio later)
+         *   07:58:22.053  iAPChannel = 0                     ← no iAP2 over Wi-Fi
+         *   07:58:22.644  Control session version = 2, starting Identification…
+         *   07:58:22.652  Identification state changed: 2     ← once, over Bluetooth
          *
          * so the iAP2 control link stays on the authenticated Bluetooth
-         * connection and the Wi-Fi command channel is only used for the
-         * car's own markers.
+         * connection, and the Wi-Fi command channel carries no second iAP2
+         * session (see `ensureCommandIap`, which now refuses to build one).
+         *
+         * The empty map is kept deliberately: enabling the tunnel would need a
+         * type-130 round-trip that no capture on this car has ever shown.
          */
         val iapReply: Map<*, *> = emptyMap<Any, Any>()
         val transport = synchronized(iapLock) {
@@ -838,21 +957,34 @@ class AirPlaySender(
 
         if (enableAudio) {
             /*
-             * PCM first, matching an established sender.
+             * AAC first — the real iPhone's choice on this car (1.3.45).
              *
-             * `hasHighQualityMediaCapability` used to force AAC ahead of PCM
-             * whenever the car declared a type-102 media entry — and this car
-             * always does, so the PCM branch was unreachable in practice. A sender that
-             * stays connected drives type=100 instead, so the capability gate no
-             * longer overrides the order. The value is
-             * still computed and logged, because a head unit that refuses PCM
-             * is the case the AAC fallback exists for.
+             * The 2026-10-31 wireless capture of BUICK_2874, 07:58:22.555:
+             *
+             *     HALCarAudioDevice-AudioMain Selecting default format for type
+             *     atme(media): APCarPlayAudioFormatInfo: MainHighAudio/media,
+             *     AAC, 48000 Hz, Stereo, 1024 samples/packet
+             *
+             * and its audio SETUP request carried `"audioFormat" : 8388608`
+             * (0x800000 — AAC-LC), not the PCM mask.
+             *
+             * Why the order was PCM-first before: an earlier sender drove
+             * type=100 on this head unit and it "stayed connected". What those
+             * captures actually show is that PCM never played — the car's
+             * `sampleTime` froze at 48048 (1.0 s) for the whole session and the
+             * link was reset 13.1 s after RECORD. The one captured session that
+             * did reach AAC 102 (`cc1030b`, 1.3.19) is the only one where
+             * `sampleTime` climbed (1.0 s → 9.1 s). It was still reset at 13.1 s,
+             * so AAC alone is not the whole fix — but it is the only format the
+             * car has ever been observed to actually play.
+             *
+             * PCM stays as the fallback for a head unit that refuses AAC.
              */
             val aacCapable = hasHighQualityMediaCapability(info)
-            val preferAacMedia = false
+            val preferAacMedia = aacCapable
             events.diagnostic(
-                "音频格式优先级：PCM(100) 优先，AAC(102) 作为回退" +
-                    "（车机声明 media AAC=$aacCapable）",
+                "[AUDIO] 格式优先级：AAC(102) 优先，PCM(100) 回退" +
+                    "（车机声明 media AAC=$aacCapable，依据 2026-10-31 真机实测）",
             )
             val candidates = SenderNegotiation.audioCandidates(info, preferAacMedia = preferAacMedia)
             val ordered = audioProfileOrder?.invoke(candidates).orEmpty().ifEmpty { candidates }
@@ -921,7 +1053,8 @@ class AirPlaySender(
         val screen = reply.firstOrNull { number(it["type"]) == 110 } ?: error("车机拒绝视频流")
         val dataPort = number(screen["dataPort"]); require(dataPort in 1..65535)
         events.diagnostic(
-            "屏幕 SETUP 已接受：type=110，画布=${selected.width}x${selected.height}，dataPort=$dataPort",
+            "[ALTSCR] 主屏 SETUP 已接受：type=110，画布=${selected.width}x${selected.height}，" +
+                "dataPort=$dataPort（真机 MainScreen 端口 6030）",
         )
         videoKey = key("DataStream-Salt$connection", "DataStream-Output-Encryption-Key")
         video = own(connect(dataPort))
@@ -935,7 +1068,19 @@ class AirPlaySender(
         // can reset the whole session before the first video packet arrives.
         wire.request("RECORD", "/")
         events.diagnostic("屏幕 RECORD 已完成，等待 startDisplay 启动来源编码器")
+        /*
+         * Bring the cluster stream up now that the main screen is running (A6).
+         *
+         * The real iPhone opens AltScreen first and then MainScreen, but opening
+         * it first here would put a second RTSP round-trip in front of the
+         * screen watchdog, and that watchdog is the thing this whole build is
+         * fighting. Opening it immediately after RECORD keeps the main stream on
+         * the shortest possible path while still giving the cluster its own
+         * type=111 stream and port.
+         */
+        secondaryDisplay?.let { openAltScreen(wire, it) }
         recordCompletedNanos = System.nanoTime()
+        recordedAtMillis = SystemClock.elapsedRealtime()
         startDisconnectHeartbeat()
         /*
          * Hand the control session over from Bluetooth to Wi-Fi.
@@ -1348,6 +1493,75 @@ class AirPlaySender(
      * PCM and the compatibility fallback retain the expanded fields used by
      * older receivers.
      */
+    /**
+     * Opens the instrument-cluster screen stream (A6, 1.3.45).
+     *
+     * The real iPhone on this car runs two screen streams side by side:
+     *
+     *     07:58:22.406  Registering streamType AltScreen, connectionID 6968160955815185368
+     *     07:58:22.441  [0xC97A] remote screen port: 6031
+     *     07:58:23.542  Registering streamType MainScreen, connectionID 13164771601038066357
+     *     07:58:23.542  [0xE123] remote screen port: 6030
+     *
+     * AltScreen carries the 2194×700 cluster display declared in `/info`; the
+     * main stream carries the 1972×520 panel. This build only ever opened the
+     * latter, so the cluster area had nothing to show.
+     *
+     * Everything is best effort: a car that refuses the second stream must not
+     * lose the main one, so every failure is logged and swallowed. The stream is
+     * opened and its port connected here; frame delivery is a later step — the
+     * encoder currently produces a single 1972×520 surface.
+     */
+    private fun openAltScreen(wire: RtspWire, display: SenderDisplay) {
+        val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
+        val stream = linkedMapOf<String, Any>(
+            "type" to 111,
+            "streamConnectionID" to connection,
+            "latencyMs" to SCREEN_LATENCY_MS,
+        )
+        display.uuid?.let { stream["uuid"] = it }
+        val reply = runCatching {
+            streams(wire.request("SETUP", "/", encode(mapOf("streams" to listOf(stream))), plistHeaders).body)
+        }.getOrElse {
+            events.diagnostic("[ALTSCR] SETUP type=111 请求失败：${it.message ?: it.javaClass.simpleName}")
+            return
+        }
+        val entry = reply.firstOrNull { number(it["type"]) == 111 }
+        if (entry == null) {
+            events.diagnostic(
+                "[ALTSCR] 车机拒绝副屏流：回包条目=" +
+                    reply.joinToString(",") { number(it["type"]).toString() },
+            )
+            return
+        }
+        val port = number(entry["dataPort"])
+        if (port !in 1..65535) {
+            events.diagnostic("[ALTSCR] 车机回执无有效 dataPort（$port）")
+            return
+        }
+        val socket = runCatching { own(connect(port)) }.getOrElse {
+            events.diagnostic("[ALTSCR] 副屏 dataPort=$port 连接失败：${it.message ?: it.javaClass.simpleName}")
+            return
+        }
+        altScreenPort = port
+        altScreenSocket = socket
+        altScreenKey = sharedSecret?.let { secret ->
+            AirPlayCrypto.hkdfSha512(
+                secret,
+                "DataStream-Salt$connection".toByteArray(),
+                "DataStream-Output-Encryption-Key".toByteArray(),
+            )
+        }
+        events.diagnostic(
+            "[ALTSCR] 副屏流已建立：type=111 ${display.width}x${display.height} " +
+                "uuid=${display.uuid} dataPort=$port（真机 AltScreen 端口 6031）",
+        )
+        events.diagnostic(
+            "[ALTSCR] 推送状态：端口已连接，帧推送=未启用" +
+                "（编码器当前只产出 ${display.width}x${display.height} 的主屏画面）",
+        )
+    }
+
     private fun setupAudio(wire: RtspWire, format: SenderAudioFormat, shared: ByteArray, address: InetAddress) {
         val id = SecureRandom().nextLong().and(Long.MAX_VALUE)
         val local = own(DatagramSocket(null)); bindDatagram(local); local.bind(InetSocketAddress(localAddress(),0))
@@ -1396,28 +1610,45 @@ class AirPlaySender(
                 put("sr", format.sampleRate)
             } else {
                 /*
-                 * Shape A — the audio SETUP.
+                 * Shape A — the audio SETUP, matched to the real iPhone on this
+                 * exact car (BUICK_2874, sysdiagnose 2026-10-31 07:58:22.808):
                  *
-                 * Its `C0281k1` builds exactly six keys:
+                 *     Request: {
+                 *         "controlPort" : 57249,                 ← the phone's own port
+                 *         "spf" : 1024,
+                 *         "audioFormat" : 8388608,               ← 0x800000 AAC-LC
+                 *         "supportsHighAccuracyTimestamps" : true,
+                 *         "audioType" : "media",
+                 *         "audioLatencyMs" : 1000,
+                 *     }
+                 *     Response: {
+                 *         "controlPort" : 6011,                  ← the car's port
+                 *         "type" : 102,
+                 *         "dataPort" : 6000,
+                 *         "streamConnectionID" : 4079875535368112191,
+                 *     }
                  *
-                 *     { type:100, streamConnectionID, audioFormat, audioType,
-                 *       audioLatencyMs, supportsHighAccuracyTimestamps:TRUE }
+                 * Two fields matter and were missing here for a long time:
                  *
-                 * with the profile `new S0(48000, 32768L, 250L, "media",
-                 * <source>)` — 48 kHz, 0x8000 (PCM stereo), 250 ms.
+                 *  - `controlPort`: the phone tells the car which local port it
+                 *    will listen on. This build used to omit it and then skip
+                 *    RTP↔NTP sync entirely; the car answered with its own
+                 *    `controlPort: 6011` that nobody ever talked to, its audio
+                 *    clock never aligned, `sampleTime` froze at 48048 (1.0 s),
+                 *    and the session was torn down 13.1 s after RECORD. The
+                 *    earlier `sendto: ECONNREFUSED` that made 1.2.90 drop the
+                 *    sync packets happened *because* the phone never announced
+                 *    a port first.
                  *
-                 * That sender runs on this exact car, so its shape is the
-                 * reference even where the iPhone capture disagrees: the phone
-                 * sends four keys with `audioLatencyMs: 32`, while an established sender
-                 * sends six with 250 and `streamConnectionID`. Sending the
-                 * phone's five-key body was worth trying, but a sender known to
-                 * hold this car open beats a different sender on different
-                 * hardware — and the phone's own capture is from a session that
-                 * also ran over USB, where several of these fields come from
-                 * the accessory instead.
+                 *  - `spf`: samples per frame. AAC media is 1024; PCM is 352.
+                 *    Without it the car cannot line up its jitter buffer with
+                 *    the sender's packetisation.
                  *
-                 * `supportsHighAccuracyTimestamps` is `Boolean.TRUE` there, not
-                 * false: An established sender always asks for timestamp alignment.
+                 * An older comment here argued this sender's own shape beat the
+                 * iPhone capture "even where the capture disagrees". That
+                 * reasoning was wrong: the capture it referred to was a
+                 * different car and a USB session. The 2026-10-31 capture is
+                 * this car, wireless, and it is the reference now.
                  */
                 /*
                  * `type` is the stream's negotiated type, not a constant.
@@ -1431,6 +1662,8 @@ class AirPlaySender(
                  */
                 put("type", streamType)
                 put("streamConnectionID", id)
+                put("controlPort", local.localPort)
+                put("spf", format.samplesPerPacket)
                 put("audioFormat", audioFormat)
                 put("audioType", audioType)
                 put("audioLatencyMs", if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS)
@@ -1470,40 +1703,59 @@ class AirPlaySender(
                 }}",
             )
             /*
-             * Pick the entry that carries a data port.
+             * Pick the reply entry for OUR stream type (1.3.45).
              *
-             * This car answers the reference SETUP with a type=101 and a
-             * type=106 entry, both with streamConnectionID and dataPort, and
-             * with no type=102 entry at all — the main AAC stream is allocated
-             * silently and never echoed. Requiring the reply to name our
-             * stream type therefore declared a perfectly good 200 a failure and
-             * re-sent the same request in the legacy shape, which this car
-             * answers with 400. The transport is the data port: whichever entry
-             * carries one is the stream to play into.
+             * This used to fall back to "whichever entry carries a dataPort",
+             * on the theory that this car allocates the main AAC stream
+             * silently. That fallback is how the main audio ended up written
+             * into a *companion* stream's port: the car answers the reference
+             * SETUP with type=101 and type=106 entries, both carrying
+             * `dataPort`, so the first one won and nothing the phone sent ever
+             * reached the media stream the car was playing into.
+             *
+             * The real iPhone capture on this car (2026-10-31 07:58:22.808)
+             * shows the main stream is NOT silent — it is answered explicitly:
+             *
+             *     Response: { "controlPort" : 6011, "type" : 102,
+             *                 "dataPort" : 6000,
+             *                 "streamConnectionID" : 4079875535368112191 }
+             *
+             * and the companion streams are separate SETUPs on their own
+             * ports (AltAudio → 6003, later, on demand). So the correct rule is
+             * an exact type match; a reply without our type means this request
+             * was refused, and the legacy shape is the next thing to try.
              */
-            replyStreams.firstOrNull { number(it["type"]) == format.streamType }
-                ?: replyStreams.firstOrNull { number(it["dataPort"]) in 1..65535 }
+            val exact = replyStreams.firstOrNull { number(it["type"]) == format.streamType }
+            events.diagnostic(
+                "[AUDIO] SETUP 回包 type=${format.streamType} 精确匹配=${exact != null}" +
+                    if (exact == null) {
+                        "（回包条目=${replyStreams.joinToString(",") { number(it["type"]).toString() }}）"
+                    } else "",
+            )
+            exact
         }.onFailure {
-            events.diagnostic("音频 SETUP 实测字段集被拒：${it.message}")
+            events.diagnostic("[AUDIO] SETUP 实测字段集被拒：${it.message}")
         }.getOrNull() ?: run {
             usedLegacy = true
-            events.diagnostic("音频 SETUP 未接受实测字段集，回退为含 controlPort 的旧字段集")
+            events.diagnostic("[AUDIO] SETUP 未接受实测字段集，回退为含 controlPort 的旧字段集")
             val legacyStreams = streams(
                 wire.request("SETUP", "/", encode(mapOf("streams" to buildMultiStreamSetup(true))), plistHeaders).body,
             )
             events.diagnostic(
-                "音频 SETUP 回包（旧字段集）：${legacyStreams.joinToString(" | ") { stream ->
+                "[AUDIO] SETUP 回包（旧字段集）：${legacyStreams.joinToString(" | ") { stream ->
                     "type=${number(stream["type"])} keys=${stream.keys.joinToString(",")}"
                 }}",
             )
             legacyStreams.firstOrNull { number(it["type"]) == format.streamType }
-        } ?: error("车机拒绝协商后的音频流")
+        } ?: error("车机拒绝协商后的音频流（回包无 type=${format.streamType} 条目）")
         events.diagnostic(
-            "音频 SETUP 已接受：${if (usedLegacy) "旧字段集（含 controlPort）" else "实测字段集（无 controlPort）"}（已发送多流描述防 30s 超时），" +
+            "[AUDIO] SETUP 已接受：${if (usedLegacy) "旧字段集" else "实测字段集"}" +
+                "（请求含 controlPort=${local.localPort} spf=${format.samplesPerPacket}），" +
                 "车机回包字段 ${accepted.keys.joinToString(",") { it.toString() }}",
         )
         val port = number(accepted["dataPort"]); require(port in 1..65535)
         audioAddress = InetSocketAddress(address, port); audioSocket = local
+        audioPorts += port
         aacTimestampClock = if (format.isPcm) null else MonotonicAudioTimestamp(format)
         lastAudioTimestamp = null
         nextAudioTimestamp = null
@@ -1527,12 +1779,26 @@ class AirPlaySender(
             "DataStream-Output-Encryption-Key".toByteArray(),
         )
         events.diagnostic(
-            "音频流已建立：type=${format.streamType} ${format.codec} ${format.sampleRate}Hz/" +
-                "${format.channels}声道 spf=${format.samplesPerPacket} port=$port " +
+            "[AUDIO] 主流已建立：type=${format.streamType} ${format.codec} ${format.sampleRate}Hz/" +
+                "${format.channels}声道 spf=${format.samplesPerPacket} dataPort=$port " +
                 "audioLatencyMs=${if (format.isPcm) PCM_LATENCY_MS else AAC_LATENCY_MS} " +
                 "inputBufferSamples=${if (format.isPcm) PCM_INPUT_BUFFER_SAMPLES else AAC_INPUT_BUFFER_SAMPLES} " +
                 "outputBufferSamples=${if (format.isPcm) PCM_OUTPUT_BUFFER_SAMPLES else AAC_OUTPUT_BUFFER_SAMPLES} " +
                 "streamConnectionID=$responseSeed",
+        )
+        /*
+         * Bitrate reference (C4). The sender does not drive the encoder's rate
+         * directly — the media encoder picks it — so this line records what the
+         * real iPhone used on this car, next to what we negotiated, for a
+         * side-by-side in the capture.
+         *
+         *     07:58:22.674  AudioMain: Setting bitrate to: 256000 (packet limit 5565 bits)
+         *     07:58:42.104  AudioAlt:  Setting bitrate to: 96000  (packet limit 1920 bits)
+         */
+        events.diagnostic(
+            "[AUDIO] 比特率基准（真机实测）：Main 256000 / Alt 96000；" +
+                "本机 type=${format.streamType} spf=${format.samplesPerPacket} " +
+                "理论每包=${format.samplesPerPacket * format.channels * 2}B",
         )
         events.diagnostic(
             "音频参数对照（an established sender 同款）：每包 ${format.samplesPerPacket} 帧" +
@@ -1548,23 +1814,46 @@ class AirPlaySender(
          *     16029 音频同步包暂时发不出去（第 1 次）：sendto failed:
          *           ECONNREFUSED (Connection refused)；继续重试
          *
-         * The car hands back a controlPort in the audio SETUP reply but never
-         * listens on it here, so the connected UDP socket draws ICMP port
-         * unreachable on every attempt. an established sender never sends these
-         * on this car at all — its audio SETUP reply carries no controlPort
-         * and its trace has no sync traffic.
+         * RTP↔NTP sync is restored (1.3.45).
          *
-         * A datagram stream to a closed port during the receiver's watchdog
-         * window is pure downside: no anchoring effect, and one more thing the
-         * connection can be reset over.
+         * 1.2.90 removed it after every session logged
+         *
+         *     16029 音频同步包暂时发不出去（第 1 次）：sendto failed:
+         *           ECONNREFUSED (Connection refused)；继续重试
+         *
+         * and concluded "the car hands back a controlPort but never listens on
+         * it". The real iPhone capture on this exact car (2026-10-31, wireless)
+         * shows the missing half of that picture:
+         *
+         *     Request:  { "controlPort" : 57249, ... }   ← the phone announces its port
+         *     Response: { "controlPort" : 6011,  ... }   ← the car answers on its own
+         *     then:     audio feedback every 2 s for the whole session,
+         *               `Parsed feedback dictionary for stream type 102: sr = 47999.9…`,
+         *               sampleTime climbing from 0 to minutes
+         *
+         * The ECONNREFUSED was not the car refusing sync — it was the car
+         * refusing a port it had never been told about. 1.3.45 puts
+         * `controlPort` into the request (see the descriptor above); with that
+         * in place the sync socket has a peer that is actually listening.
+         *
+         * If it still draws ICMP unreachable, that is now a measurement, not a
+         * guess: the log line below reports it once per attempt with the port
+         * so the next capture can settle it.
          */
         if (controlPort in 1..65535) {
             events.diagnostic(
-                "车机回包带 controlPort=$controlPort，但本实现不发送 RTP↔NTP 同步包" +
-                    "（工作轨迹在本车也无法送达，持续 ECONNREFUSED）",
+                "[AUDIO-SYNC] controlPort 本端=${local.localPort} 车机=$controlPort → 启动 RTP↔NTP 同步",
             )
+            runCatching {
+                startAudioSync(address, controlPort, format)
+            }.onFailure {
+                events.diagnostic("[AUDIO-SYNC] 同步线程启动失败：${it.message}")
+            }
         } else {
-            events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
+            events.diagnostic(
+                "[AUDIO-SYNC] 车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包" +
+                    "（真机在该字段有值时是会同步的，见 2026-10-31 抓包）",
+            )
         }
         /*
          * The companion stream is opened later, not now.
@@ -1792,9 +2081,42 @@ class AirPlaySender(
             )
         }
         events.diagnostic(
-            "第二条音频流已建立：type=$companionType audioType=$companionAudioType " +
-                "port=$port spf=${format.samplesPerPacket} audioLatencyMs=$PCM_LATENCY_MS " +
+            "[AUDIO] 辅助流已建立（AltAudio）：type=$companionType audioType=$companionAudioType " +
+                "dataPort=$port spf=${format.samplesPerPacket} audioLatencyMs=$PCM_LATENCY_MS " +
                 "streamConnectionID=$responseSeed",
+        )
+        events.diagnostic(
+            "[AUDIO] 四流进度：Main(102)=已建立 | Alt(101)=本次建立 | " +
+                "Aux(106)=未建立（Siri 触发，真机 07:59:27.983）| " +
+                "OOB(107)=未建立（Siri 上行，真机 07:59:27.885）",
+        )
+    }
+
+    /**
+     * Brings up the streams a Siri turn needs (A8).
+     *
+     * The real iPhone on this car opens these only when Siri is invoked, at
+     * 07:59:27, more than a minute into the session — never at RECORD:
+     *
+     *     07:59:27.885  OutOfBandAVVCAudio: Setup succeeded
+     *                   Request: { burstPeriodMs: 0, input: true,
+     *                              supportsRTPPacketRedundancy: true,
+     *                              audioLatencyMs: 80, streamStart... }
+     *     07:59:27.983  AudioAux: Setup succeeded
+     *     07:59:27.938  AudioAux: Setting bitrate to: 96000 (packet limit 1920 bits)
+     *
+     * AudioAux is `AuxAudio/speechRecognition, Opus, 48000 Hz, Mono, 960 spf,
+     * 0x40000000` — the same codec/rate/framing as AudioAlt but on its own
+     * port. OutOfBandAVVCAudio is the Siri uplink and carries `input: true`.
+     *
+     * Not wired to a Siri handler yet: this build cannot originate a Siri
+     * turn, so the streams would have no consumer. The probe below records
+     * whether the car asks for one, which is what a later build needs to know.
+     */
+    private fun probeSiriStreams(note: String) {
+        events.diagnostic(
+            "[AUDIO] Siri 流状态：$note；Aux(106) 参数=Opus/48k/Mono/960spf，" +
+                "OOB(107) 参数=latency 80ms/input=true（真机 07:59:27 实测）",
         )
     }
 
@@ -1854,12 +2176,13 @@ class AirPlaySender(
                 val sent = runCatching { socket.send(DatagramPacket(packet, packet.size)) }
                 if (sent.isSuccess) {
                     consecutiveFailures = 0
+                    val seqSent = audioSyncSequence
                     audioSyncSequence = (audioSyncSequence + 1) and 0xffff
                     if (first) {
                         first = false
                         events.diagnostic(
-                            "音频首个 RTP↔NTP 同步包已发送：controlPort=$controlPort " +
-                                "ts=$current→$next rate=${format.sampleRate}Hz",
+                            "[AUDIO-SYNC] 首个 RTP↔NTP 同步包已发出：controlPort=$controlPort " +
+                                "seq=$seqSent ts=$current→$next rate=${format.sampleRate}Hz",
                         )
                     }
                 } else {
@@ -1867,11 +2190,15 @@ class AirPlaySender(
                     val reason = sent.exceptionOrNull()?.message ?: "未知错误"
                     if (consecutiveFailures == 1 || consecutiveFailures % 100 == 0) {
                         events.diagnostic(
-                            "音频同步包暂时发不出去（第 $consecutiveFailures 次）：$reason；继续重试",
+                            "[AUDIO-SYNC] 同步包发不出去（第 $consecutiveFailures 次）：" +
+                                "controlPort=$controlPort seq=$audioSyncSequence reason=$reason；继续重试",
                         )
                     }
                     if (consecutiveFailures >= AUDIO_SYNC_MAX_FAILURES) {
-                        events.diagnostic("音频同步包连续失败 $consecutiveFailures 次，停止同步线程")
+                        events.diagnostic(
+                            "[AUDIO-SYNC] 连续失败 $consecutiveFailures 次，停止同步线程" +
+                                "（车机 controlPort=$controlPort 未监听）",
+                        )
                         return@Thread
                     }
                 }
@@ -1880,7 +2207,7 @@ class AirPlaySender(
         }, "carplay-audio-sync").apply { isDaemon = true }
         audioSyncThread = worker
         worker.start()
-        events.diagnostic("音频 RTP↔NTP 同步已启用：$address:$controlPort，每 ${AUDIO_SYNC_INTERVAL_MS}ms")
+        events.diagnostic("[AUDIO-SYNC] 已启用：$address:$controlPort，每 ${AUDIO_SYNC_INTERVAL_MS}ms")
     }
 
     private fun ntpBytes(value: BigInteger): ByteArray {
@@ -2041,9 +2368,39 @@ class AirPlaySender(
         lastFeedbackReportAt = now
         if (receiverAudioSampleTime < 0) return
         val samples = receiverAudioSampleTime
-        val seconds = samples.toDouble() / (selectedAudio?.sampleRate ?: 48_000).toDouble()
+        val rate = selectedAudio?.sampleRate ?: 48_000
+        val seconds = samples.toDouble() / rate.toDouble()
+        /*
+         * L-A: the receiver's playout position, next to what this side has
+         * actually sent.
+         *
+         * This is the single most diagnostic number in the session, and the one
+         * that was missing the whole time. On this car:
+         *
+         *   PCM sessions  `sampleTime` froze at 48048 (1.0 s) — the car accepted
+         *                 every packet and played none; reset 13.1 s after RECORD.
+         *   AAC session   `sampleTime` climbed (1.0 s → 9.1 s, `cc1030b`) —
+         *                 the only format this car has ever been seen to play.
+         *   real iPhone   climbs continuously, e.g. `47999.906250` sample rate
+         *                 over 11.52 s at 07:58:34.548.
+         *
+         * Printing sent-vs-played side by side turns "is the car playing?" into
+         * a subtraction instead of an inference. A growing gap means packets
+         * are arriving but the receiver is not consuming them; a frozen
+         * `sampleTime` with a climbing sent count is the PCM failure exactly.
+         */
+        val sentSamples = audioSamplesSent
+        val driftMs = if (sentSamples > 0 && samples > 0) {
+            ((sentSamples - samples).toDouble() / rate * 1000.0).toLong()
+        } else {
+            Long.MIN_VALUE
+        }
         events.diagnostic(
-            "车机音频进度：sampleTime=$samples（${"%.1f".format(seconds)}s），回执 ${receiverFeedbackCount} 次",
+            "[AUDIO-FB] stream=${selectedAudio?.streamType} " +
+                "sampleTime=$samples (${"%.1f".format(seconds)}s) " +
+                "本端已发=$sentSamples 差=" +
+                (if (driftMs == Long.MIN_VALUE) "?" else "${driftMs}ms") +
+                " 回执=${receiverFeedbackCount} 次",
         )
     }
 
@@ -2226,6 +2583,7 @@ class AirPlaySender(
         // First packet in full detail, then one summary per second: enough to
         // tell "we are sending" apart from "we are sending nothing".
         val sent = ++audioPacketsSent
+        audioSamplesSent += format.samplesPerPacket.toLong()
         if (sent == 1L) {
             events.diagnostic(
                 "音频首包：type=${format.streamType} ${format.codec} ${payload.size}B " +
@@ -2526,8 +2884,84 @@ class AirPlaySender(
                 val accepted = events.input(command)
                 return ControlReply(if (accepted) 200 else 501)
             }
-            "requestSiri", "setNightMode", "updateViewArea", "setLimitedUI" ->
+            "requestSiri" -> {
+                /*
+                 * The car is asking for a Siri turn. On the real iPhone this is
+                 * `Endpoint_SiriRequestion` with `ActivationSeed`, answered with
+                 * the accessory timestamp so the two clocks agree:
+                 *
+                 *     07:59:27.305  Siri action: 1; saving timestamp ..., diff 1 ms
+                 *     07:59:27.305  Posting 'Endpoint_SiriRequestion' { Timestamp, ActivationSeed }
+                 *     07:59:27.310  Received Siri prewarm action, sending accessory timestamp
+                 *
+                 * This build cannot originate a Siri turn, so it logs the request
+                 * and the timestamp it would have answered with — enough for a
+                 * field capture to show whether the car asks and when.
+                 */
+                siriRequests += 1
+                val nowNanos = System.nanoTime()
+                events.diagnostic(
+                    "[SIRI] requestSiri #$siriRequests 收到，" +
+                        "accessory timestamp=${nowNanos}（" +
+                        "真机回传的是同名字段，见 2026-10-31 07:59:27.305）",
+                )
+                probeSiriStreams("车机请求 Siri，未建立 Aux/OOB（本构建不发 Siri 轮次）")
                 return ControlReply(if (events.input(command)) 200 else 501)
+            }
+            "setNightMode", "updateViewArea", "setLimitedUI" ->
+                return ControlReply(if (events.input(command)) 200 else 501)
+            /*
+             * `duckAudio` — the car asking the phone to turn its own music down
+             * while navigation speaks (J1).
+             *
+             * The real iPhone on this car, 07:58:42.084:
+             *
+             *     [0x1725] duck audio for endpoint 'CarPlay车载' with inParams {
+             *         "DuckCommand" : "DuckCommand_Duck",
+             *         "DuckVolume"  : -13.979400 }
+             *
+             * Volumes live on the car's own knob (`initialVolume = -999.000000 dB`
+             * at 07:58:22.254 — the receiver never supplies one), so there is
+             * nothing for the phone to apply here. Recording it is what makes
+             * the navigation-audio path visible in a capture.
+             */
+            /*
+             * The car asking which transport commands the phone supports (D2).
+             *
+             * The real iPhone on this car advertises (2026-10-31 07:58:23.443,
+             * `currentPlaybackAttributes`):
+             *
+             *     supportedCommands: 21, isLikeSupported=0
+             *     supportedCommands: 22, isBanSupported=0
+             *     supportedCommands: 24, SetTimeElpasedAvailable
+             *     supportedCommands: 25, RepeastMode=1
+             *     supportedCommands: 26, ShuffleMode=3
+             *
+             * plus the media item commands 21/22 from `currentMediaItemAttributes`.
+             * This build never answers, so the car's transport UI has no command
+             * set to render. Logged first so a capture shows exactly what this
+             * firmware asks for; answering it needs the same field ids.
+             */
+            "supportedCommands", "getSupportedCommands" -> {
+                val params = command["params"] as? Map<*, *> ?: emptyMap<Any, Any>()
+                events.diagnostic(
+                    "[HID] supportedCommands 请求：${params.entries.joinToString(" ") { "${it.key}=${it.value}" }}",
+                )
+                events.diagnostic(
+                    "[HID] supportedCommands 基准（真机）：21 Like / 22 Ban / 24 SetTimeElapsed / " +
+                        "25 Repeat=1 / 26 Shuffle=3",
+                )
+                return ControlReply(if (events.input(command)) 200 else 501)
+            }
+            "duckAudio" -> {
+                duckCommands += 1
+                val params = command["params"] as? Map<*, *> ?: emptyMap<Any, Any>()
+                events.diagnostic(
+                    "[VOL] duckAudio #$duckCommands DuckCommand=${params["DuckCommand"]} " +
+                        "DuckVolume=${params["DuckVolume"]}（音量由车机硬件控制，本端不施加）",
+                )
+                return ControlReply(if (events.input(command)) 200 else 501)
+            }
             else -> { events.diagnostic("不支持的车机命令：${command["type"]}"); return ControlReply(501) }
         }
         return ControlReply(200)
@@ -2573,6 +3007,52 @@ class AirPlaySender(
         return "会话快照：视频帧=$frames 音频包=$audio /feedback=$feedback " +
             "$owns $tunnel $hid $audioDetail " +
             "待发缓冲=${pcmCarry.size}B 丢弃=${pcmCarryDropped}B"
+    }
+
+    /**
+     * The side-by-side table a field capture is read from (L-F).
+     *
+     * Every line puts what the real iPhone did on this car (2026-10-31
+     * sysdiagnose) next to what this session did, so a test run answers itself
+     * instead of needing someone to open `full.jsonl` and compare by hand.
+     *
+     * The reference column is not decoration: each value is a measured fact
+     * from that capture, and a mismatch is the thing to look at next.
+     */
+    fun comparisonSummary(): List<String> {
+        val audio = selectedAudio
+        val audioLine = audio?.let { "${it.streamType}/${it.codec}" } ?: "未协商"
+        val audioMatch = audio != null && !audio.isPcm && audio.streamType == 102
+        val altLine = if (audioPorts.isNotEmpty()) audioPorts.joinToString(",") else "无"
+        val sampleLine = if (receiverAudioSampleTime >= 0) {
+            "${receiverAudioSampleTime}（本端已发 $audioSamplesSent，差 " +
+                (if (audioSamplesSent > 0) {
+                    "${((audioSamplesSent - receiverAudioSampleTime).toDouble() /
+                        (audio?.sampleRate ?: 48_000) * 1000).toLong()}ms"
+                } else "?") + "）"
+        } else {
+            "车机未回报"
+        }
+        val disconnectedMs = if (recordedAtMillis > 0 && closedAtMillis > 0) {
+            "${closedAtMillis - recordedAtMillis}ms"
+        } else {
+            "未记录"
+        }
+        return listOf(
+            "[SUMMARY] ═══ 本次会话对照（参照：2026-10-31 真机 BUICK_2874）═══",
+            "[SUMMARY] 音频格式:     真机 102/AAC     | 本机 $audioLine | 一致=${if (audioMatch) "Y" else "N"}",
+            "[SUMMARY] 音频流:       真机 Main+Alt+Aux+OOB | 本机 $audioLine + 辅助=${if (altLine == "无") "无" else altLine}",
+            "[SUMMARY] 音频反馈:     真机 每2秒增长   | 本机 sampleTime=$sampleLine",
+            "[SUMMARY] 音频同步:     真机 controlPort 双向 | 本机 已发同步包=$audioSyncSequence 次",
+            "[SUMMARY] 副屏:         真机 6031/2194x700 | 本机 ${if (altScreenPort > 0) "$altScreenPort/${secondaryDisplay?.width}x${secondaryDisplay?.height}" else "未建立"} | 一致=${if (altScreenPort > 0) "Y" else "N"}",
+            "[SUMMARY] 命令通道:     真机 iAPChannel=0 不建 | 本机 ${if (commandIapAttempts > 0) "建了 $commandIapAttempts 次" else "未建"} | 一致=${if (commandIapAttempts == 0) "Y" else "N"}",
+            "[SUMMARY] 媒体包:       真机 type2/type3 分开 | 本机 见 [NOWPLAY] 行",
+            "[SUMMARY] Siri:         真机 有 requestSiri | 本机 收到 $siriRequests 次",
+            "[SUMMARY] 音量:         真机 有 DuckCommand | 本机 收到 $duckCommands 次",
+            "[SUMMARY] 断连:          真机 >10 分钟    | 本机 RECORD→关闭 $disconnectedMs",
+            "[SUMMARY] 视频帧=$videoFramesSinceKeepAlive 音频包=$audioPacketsSent /feedback=$feedbackCount",
+            "[SUMMARY] ═══ 上一行之后请看 [AUDIO-FB] / [NOWPLAY] / [HID] / [NAV] 各通道 ═══",
+        )
     }
 
     /**
@@ -2660,6 +3140,14 @@ class AirPlaySender(
     override fun close() {
         if (!closed.get()) {
             runCatching { events.diagnostic(sessionSnapshot()) }
+            /*
+             * L-F: the comparison table, printed once per session.
+             *
+             * Placed before the sockets go away so it always lands in the
+             * journal, including on an abnormal teardown — that is exactly the
+             * case a test run needs it for.
+             */
+            runCatching { comparisonSummary().forEach { events.diagnostic(it) } }
         }
         if (!closed.compareAndSet(false,true)) return
         /*
@@ -2682,6 +3170,7 @@ class AirPlaySender(
          * still alive to carry it; every step is best effort and failures are
          * recorded, never thrown.
          */
+        closedAtMillis = SystemClock.elapsedRealtime()
         runCatching { retireGracefully() }
         /*
          * A profile is only considered rejected when SETUP succeeded, real

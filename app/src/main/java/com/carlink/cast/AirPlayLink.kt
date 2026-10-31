@@ -696,16 +696,18 @@ internal class AirPlayLink(
                             nextIdentifyRetry = Long.MAX_VALUE
                             val stage = control.status()
                             logChannel(LogChannel.IAP,
-                                "Wi-Fi iAP2 引导：已发 0x1D00（模式=等待车机），之后不再主动发送；" +
-                                    "identified=${stage.identified} authenticated=${stage.authenticated} " +
+                                "[IAP-ID] 识别第 $identifyRequested 次（本会话唯一一次）：已发 0x1D00，" +
+                                    "之后不再主动发送；identified=${stage.identified} " +
+                                    "authenticated=${stage.authenticated} " +
                                     "certificate=${stage.certificateReceived} 已收CSM=$csmReceived",
                             )
                         }
                         if (System.nanoTime() - lastReport >= TimeUnit.SECONDS.toNanos(5)) {
                             lastReport = System.nanoTime()
                             logChannel(LogChannel.IAP,
-                                "命令通道 5 秒汇总：已发识别=$identifyRequested 已收CSM=$csmReceived " +
-                                    "identified=${control.status().identified}",
+                                "[IAP-ID] 命令通道 5 秒汇总：已发识别=$identifyRequested " +
+                                    "已收CSM=$csmReceived identified=${control.status().identified}" +
+                                    "（真机识别 1 次、8ms 完成，见 2026-10-31 07:58:22.644）",
                             )
                         }
                         /*

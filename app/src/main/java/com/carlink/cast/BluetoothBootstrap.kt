@@ -120,6 +120,10 @@ internal class BluetoothBootstrap(
 
     private var phoneService: RegisteredRfcommService<BluetoothServerSocket>? = null
 
+    /** Navigation requests seen; read by the session summary. */
+    @Volatile private var navRequests = 0
+    /** True once the car has sent 0x6800 (HID subscription); read by the summary. */
+    @Volatile private var hidStartSeen = false
     /** Set once 0x4301 has been received; the link itself stays open. */
     private val endpoint = CompletableFuture<WirelessEndpoint>()
 
@@ -346,12 +350,74 @@ internal class BluetoothBootstrap(
             // Steering-wheel and panel buttons arrive as iAP2 HID messages on
             // this channel; log the raw body so the button map can be built
             // from real presses before any translation exists.
-            if (frame.messageId in setOf(0x6800, 0x6802, 0x6803)) {
-                val body = frame.payload
-                log("车机按键消息 0x${frame.messageId.toString(16)} 长度=${body.size} " +
-                    "hex=${body.joinToString(" ") { "%02X".format(it) }}")
-            } else {
-                log("车机消息 0x${frame.messageId.toString(16)}")
+            when (frame.messageId) {
+                0x6800 -> {
+                    val body = frame.payload
+                    hidStartSeen = true
+                    log(
+                        "[HID] 0x6800 StartHID 到达：描述符 ${body.size}B " +
+                            "hex=${body.take(64).joinToString(" ") { "%02X".format(it) }}" +
+                            if (body.size > 64) "…" else "",
+                    )
+                    /*
+                     * 0x6800 is the car subscribing to the phone's HID reports;
+                     * 0x6801 (phone → accessory) is how those reports go back.
+                     * Registering means keeping the descriptor and answering
+                     * later with 0x6801 — there is no separate "accepted" reply.
+                     *
+                     * The real iPhone starts a Network HID device
+                     * (`07:58:29.046 ### [0x16F3] Network HID report submitted`),
+                     * which is the shape a later build needs. Until then the
+                     * probe below is what a capture needs: whether the car ever
+                     * asks at all. Every field session so far has logged
+                     * `iAP2-HID=未注册（0x6800 未到达）`, and the 2026-10-31
+                     * iPhone capture shows this car does subscribe — so the
+                     * difference is on our side of the handshake.
+                     */
+                }
+                0x6802, 0x6803 -> {
+                    val body = frame.payload
+                    log(
+                        "[HID] 0x${frame.messageId.toString(16)} " +
+                            (if (frame.messageId == 0x6803) "StopHID" else "HID 报告") +
+                            " 长度=${body.size} hex=${body.take(48).joinToString(" ") { "%02X".format(it) }}" +
+                            if (body.size > 48) "…" else "",
+                    )
+                }
+                0x5200 -> {
+                    /*
+                     * StartRouteGuidanceUpdates (F2 probe).
+                     *
+                     * The car subscribes the phone's navigation to this message;
+                     * the payload names the components it wants updates for. The
+                     * real iPhone answers it and then streams `ACCNav_RGUpdate_*`
+                     * fields (18 of them, 2026-10-31 07:58:41+). This build has
+                     * no navigation source yet, so the probe records what the
+                     * car asks for — that is the input a later mapping needs.
+                     */
+                    val body = frame.payload
+                    navRequests += 1
+                    log(
+                        "[NAV] 0x5200 StartRouteGuidanceUpdates 到达（第 $navRequests 次）：" +
+                            "${body.size}B hex=${body.take(64).joinToString(" ") { "%02X".format(it) }}" +
+                            if (body.size > 64) "…" else "",
+                    )
+                    log(
+                        "[NAV] 真机基准：componentID 1=Cluster(40字符) 2=CardView(33字符)，" +
+                            "字段 18 个（RouteGuidanceState/DestinationName/DistanceRemaining/...）",
+                    )
+                }
+                0x5201, 0x5202, 0x5203 -> {
+                    navRequests += 1
+                    log(
+                        "[NAV] 0x${frame.messageId.toString(16)} 到达：" +
+                            "${frame.payload.size}B（导航更新类消息）",
+                    )
+                }
+                else -> log(
+                    "[IAP] 车机消息 0x${frame.messageId.toString(16)}：" +
+                        "${frame.payload.size}B",
+                )
             }
             // The head unit subscribes to phone status right after
             // authentication and keeps those subscriptions for the session.
@@ -423,8 +489,24 @@ internal class BluetoothBootstrap(
             u8(2, 0)
         }
         0xae00 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0xae01) { u8(0, 0) }
-        0x4157 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x4158) { u8(0, 0) }
-        0x4154 -> com.carplay.iap2.message.Iap2Messages.buildRaw(0x4155) { u8(0, 0) }
+        0x4157 -> {
+            /*
+             * StartCommunicationsUpdates (G2 probe).
+             *
+             * The car subscribes phone/communications state here. The real
+             * iPhone has `com.apple.InCallService` attached as an iAP2 client
+             * (2026-10-31 07:58:22.455) and advertises telephony audio at
+             * 16000/24000 Hz mono. This build replies so the car is not left
+             * waiting, but carries no call state — the probe records that the
+             * subscription happened so a later build knows where to attach.
+             */
+            log("[CALL] 0x4157 StartCommunicationsUpdates 到达，已应答 0x4158（未提供通话状态）")
+            com.carplay.iap2.message.Iap2Messages.buildRaw(0x4158) { u8(0, 0) }
+        }
+        0x4154 -> {
+            log("[CALL] 0x4154 StartCallStateUpdates 到达，已应答 0x4155（未提供通话状态）")
+            com.carplay.iap2.message.Iap2Messages.buildRaw(0x4155) { u8(0, 0) }
+        }
         else -> null
     }
 

@@ -50,9 +50,18 @@ internal fun isCarLifeKeyFrame(data: ByteArray): Boolean {
  * It will not build its encoder before that, so opening the command port alone
  * never produces video.
  *
- * Once connected, the head unit has to ask for video with VIDEO_ENCODER_INIT.
- * This build never volunteers it, and never sends FEATURE_CONFIG_REQUEST or
- * AUTHEN_RESULT, so waiting for either of those stalls forever.
+ * Once connected, the head unit drives the video request with VIDEO_ENCODER_INIT.
+ *
+ * Correction (1.3.45): an older version of this comment claimed the build
+ * "never sends FEATURE_CONFIG_REQUEST or AUTHEN_RESULT". That was wrong when it
+ * was written and is certainly wrong now — this class sends both:
+ *
+ *   `HU_AUTHEN_RESULT`         in the `MD_AUTHEN_RESPONSE` branch
+ *   `HU_FEATURE_CONFIG_RESPONSE` proactively after authentication
+ *
+ * The phone never sends `FEATURE_CONFIG_REQUEST`, which is a different message
+ * and a different direction. Reading the old comment as the protocol shape led
+ * to the belief that the handshake was one-sided; it is not.
  */
 internal class CarLifeSession(
     private val host: String,
@@ -157,6 +166,8 @@ internal class CarLifeSession(
     @Volatile var mediaInfoSubscribed = false
         private set
 
+    /** Command ids logged once by the navigation probe (L1a). */
+    private val unloggedCommands = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     /** Set once the data-subscription handshake has been sent for this session. */
     private var mediaSubscribed = false
 
@@ -443,9 +454,10 @@ internal class CarLifeSession(
                     )
                 )
                 log("已主动下发车机功能配置：FOCUS_UI=1，MEDIA_SAMPLE_RATE=48K，VOICE_MIC=手机")
-                // Nothing else asks the phone to start encoding: this build sends
-                // neither FEATURE_CONFIG_REQUEST nor AUTHEN_RESULT. Requesting the
-                // encoder here is what starts the video stream.
+                // Nothing else asks the phone to start encoding: the phone never
+                // sends FEATURE_CONFIG_REQUEST, and AUTHEN_RESULT was already
+                // answered two blocks above. Requesting the encoder here is what
+                // starts the video stream.
                 if (encoderLifecycle.requestInitial()) {
                     log("认证通过，请求手机编码器 ${width}x$height@$fps")
                     sendCommand(CarLifeProtocol.VIDEO_ENCODER_INIT, encoderInitPayload())
@@ -590,10 +602,35 @@ internal class CarLifeSession(
                 if (modules.isEmpty() || 2 in modules) mediaInfoSubscribed = false
             }
 
-            CarLifeProtocol.MEDIA_INFO -> log("媒体信息已推送：${payload.size}B")
+            CarLifeProtocol.MEDIA_INFO -> log("[NOWPLAY] 媒体信息已推送：${payload.size}B")
             CarLifeProtocol.MEDIA_PROGRESS_BAR -> Unit
 
-            else -> Unit
+            /*
+             * Everything else, logged once per id (L1a).
+             *
+             * CarLife's `HU_DATA_SUBSCRIBE_START` for moduleID 0 is turn-by-turn
+             * navigation, and this session subscribes to `[0, 2]`. Module 0's
+             * reply never appears in any field capture because the phone only
+             * pushes it while a navigation app is actually guiding — but the
+             * message id it would use is not in any reverse-engineering note
+             * either, so there is nothing to match against yet.
+             *
+             * Recording the first occurrence of every unrecognised id is what
+             * turns the next drive into evidence: if a new id shows up while
+             * navigation is running, that is the one to decode. Only the first
+             * occurrence is logged per id, so a chatty message cannot flood the
+             * journal.
+             */
+            else -> {
+                val shown = "0x${serviceType.toString(16)}"
+                if (unloggedCommands.add(shown)) {
+                    log(
+                        "[CARLIFE-NAVI] 未识别消息 id=$shown ${payload.size}B " +
+                            "hex=${payload.take(48).joinToString(" ") { "%02X".format(it) }}" +
+                            if (payload.size > 48) "…" else "",
+                    )
+                }
+            }
         }
     }
 

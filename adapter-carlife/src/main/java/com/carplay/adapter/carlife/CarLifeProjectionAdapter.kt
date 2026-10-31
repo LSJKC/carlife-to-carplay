@@ -829,15 +829,39 @@ class CarLifeProjectionAdapter : PhoneProjectionAdapter {
                 if (!down) {
                     return@lambda  // Only handle key-down
                 }
-                // Convert CarLife code back to Android KeyEvent code and route to MediaSession
+                /*
+                 * Route CarLife's hard key to the Android media session (D3).
+                 *
+                 * This callback used to convert the code to an Android key
+                 * code, log it, and stop — with a comment claiming "routing
+                 * will be handled by the Dispatch layer in the app module".
+                 * No such routing existed: the app only ever *set*
+                 * `CarLifeBridge.mediaKeyDispatcher` (CarLinkApplication.kt:25),
+                 * never received anything from this side. Every steering-wheel
+                 * NEXT/PREVIOUS pressed while CarLife owned the audio therefore
+                 * did nothing but write a log line.
+                 *
+                 * The dispatcher is the same one the host service uses for its
+                 * own key events, so this is the existing path rather than a
+                 * second one.
+                 */
                 val androidCode = CarLifeHardKey.toAndroid(carLifeCode)
-                if (androidCode != null) {
-                    // Emit diagnostic with Android KeyEvent code, routing will be handled
-                    // by the Dispatch layer in the app module
+                if (androidCode == null) {
                     observer?.diagnostic(
-                        "车机硬键已转换：CarLife code=$carLifeCode → Android KeyCode=$androidCode"
+                        "[HID] 车机硬键 carLifeCode=$carLifeCode 无对应 Android 码，已忽略",
                     )
+                    return@lambda
                 }
+                val dispatched = runCatching {
+                    CarLifeBridge.mediaKeyDispatcher?.invoke(androidCode) ?: false
+                }.getOrElse {
+                    observer?.diagnostic("[HID] 硬键分发异常：${it.message}")
+                    false
+                }
+                observer?.diagnostic(
+                    "[HID] 硬键 carLifeCode=$carLifeCode → Android=$androidCode " +
+                        "分发=${if (dispatched) "成功" else "无消费者（未初始化或无匹配 MediaSession）"}",
+                )
             }
             CarLifeBridge.audio = { pcm, sampleRate ->
                 handleBridgeAudio(pcm, sampleRate, observer)

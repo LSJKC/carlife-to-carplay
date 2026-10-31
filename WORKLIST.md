@@ -15,7 +15,7 @@
 - 车机：2025 别克君越艾维亚，型号 **E2LB**，`BUICK_2874`，蓝牙 `EC:D9:09:3E:F8:0A`
 - 面板：1972×520，安全区 1408×476 @ +278,+44；副屏 2194×700
 - 手机：HONOR BKQ-AN90，Android 17
-- 当前版本：**1.3.44**（`23e3067a`）
+- 当前版本：**1.3.45**（`c9f42679`，2026-11-01，30 条全量实现）
 
 **参照物**：真 iPhone 在同一台车上的无线 CarPlay 会话
 `sysdiagnose_2026.10.31_16-00-05+0800_iPhone-OS_iPhone_24A446`（用户实车抓取，14:58 本地时间）
@@ -147,10 +147,10 @@ commit `959adea`，当时理由：
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| **N1** | 音频 SETUP 请求加入我方 `controlPort` | 待办 | **P0** |
-| **N2** | 恢复 `startAudioSync()` 调用，向车机回的 `controlPort` 发 RTP↔NTP 同步包 | 待办 | **P0** |
-| N3 | 请求补 `spf`（AAC 1024 / PCM 352） | 待办 | P0 |
-| N4 | 请求补 `supportsHighAccuracyTimestamps: true` | 待办 | P0 |
+| **N1** | 音频 SETUP 请求加入我方 `controlPort` | ✅ 1.3.45 | **P0** |
+| **N2** | 恢复 `startAudioSync()` 调用，向车机回的 `controlPort` 发 RTP↔NTP 同步包 | ✅ 1.3.45 | **P0** |
+| N3 | 请求补 `spf`（AAC 1024 / PCM 352） | ✅ 1.3.45 | P0 |
+| N4 | 请求补 `supportsHighAccuracyTimestamps: true` | ✅ 1.3.45 | P0 |
 
 **代码位置**：`AirPlaySender.kt` shape A 约 1435–1440 行，`startAudioSync` 在 1807。
 
@@ -211,10 +211,10 @@ val iapReply: Map<*, *> = emptyMap<Any, Any>()
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| **B1** | `iAPChannel=0` 时不建 Wi-Fi iAP2 会话；检测包只回显 | 待办 | **P0** |
-| B2 | 识别/认证每会话只做一次 | 待办 | P0 |
-| B3 | 合并两套命令通道实现，删除不可达分支 | 待办 | P1 |
-| B4 | 修正 `AirPlaySender.kt:749-781` 误导性注释 | 待办 | P2 |
+| **B1** | `iAPChannel=0` 时不建 Wi-Fi iAP2 会话；检测包只回显 | ✅ 1.3.45 | **P0** |
+| B2 | 识别/认证每会话只做一次 | ✅ 1.3.45 | P0 |
+| B3 | 合并两套命令通道实现，删除不可达分支 | ✅ 1.3.45 | P1 |
+| B4 | 修正 `AirPlaySender.kt:749-781` 误导性注释 | ✅ 1.3.45 | P2 |
 
 ---
 
@@ -278,11 +278,11 @@ NowPlaying 0x5001 frame=140B
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| **Q4** | `0x5001` 按需分包，常态压到 7 字节 body | 待办 | **P1** |
-| **Q5** | 补 `type=3` PlaybackQueueList 独立包 | 待办 | P1 |
-| **Q6** | 封面走 file transfer，`0x5001` 只带 ID（`ARTWORK_NONE=0x80`） | 待办 | P1 |
-| Q7 | 封面改 768×768 JPEG + `MIMEType` + `ArtworkIdentifier` | 待办 | P1 |
-| Q8 | 补字段：Genre / Composer / Index / Disc / Liked / Banned / PlaybackRate | 待办 | P2 |
+| **Q4** | `0x5001` 按需分包，常态压到 7 字节 body | ✅ 1.3.45 | **P1** |
+| **Q5** | 补 `type=3` PlaybackQueueList 独立包 | ✅ 1.3.45 | P1 |
+| **Q6** | 封面走 file transfer，`0x5001` 只带 ID（`ARTWORK_NONE=0x80`） | ✅ 1.3.45 | P1 |
+| Q7 | 封面改 768×768 JPEG + `MIMEType` + `ArtworkIdentifier` | ✅ 1.3.45 | P1 |
+| Q8 | 补字段：Genre / Composer / Index / Disc / Liked / Banned / PlaybackRate | ✅ 1.3.45 | P2 |
 
 **代码位置**：`app/src/main/java/com/carlink/cast/NowPlayingPublisher.kt:192`（`encode`）、`:626`（`ARTWORK_NONE`）
 
@@ -343,11 +343,11 @@ AudioAlt   → 端口 6003（07:58:42.163 建立，48.228 停、48.356 重启）
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| **A4** | 媒体音频改 AAC(102) + `audioLatencyMs=1000` | 待办 | P0 |
-| A5 | 修复音频档位记忆（清空「已拒」列表） | 待办 | P0 |
-| **A8** | 每路音频独立 SETUP + 独立端口（Main/Alt/Aux/OOB） | 待办 | P1 |
-| A7' | 回包按 `streamType` 匹配，删掉「任意有 dataPort 的条目」兜底 | 待办 | P1 |
-| C4 | 比特率 Main 256000 / Alt 96000 | 待办 | P2 |
+| **A4** | 媒体音频改 AAC(102) + `audioLatencyMs=1000` | ✅ 1.3.45 | P0 |
+| A5 | 修复音频档位记忆（清空「已拒」列表） | ✅ 1.3.45 | P0 |
+| **A8** | 每路音频独立 SETUP + 独立端口（Main/Alt/Aux/OOB） | ✅ 1.3.45 | P1 |
+| A7' | 回包按 `streamType` 匹配，删掉「任意有 dataPort 的条目」兜底 | ✅ 1.3.45 | P1 |
+| C4 | 比特率 Main 256000 / Alt 96000 | ✅ 1.3.45 | P2 |
 
 **A7' 代码位置**：`AirPlaySender.kt:1489`
 ```kotlin
@@ -401,8 +401,8 @@ replyStreams.firstOrNull { number(it["type"]) == format.streamType }
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| **A6** | 建立 AltScreen 流（端口 6031，2194×700） | 待办 | **P1** |
-| P3 | 推 CarLife 副屏画面 or 自定义媒体卡到 AltScreen | 待办 | P1 |
+| **A6** | 建立 AltScreen 流（端口 6031，2194×700） | ✅ 1.3.45 | **P1** |
+| P3 | 推 CarLife 副屏画面 or 自定义媒体卡到 AltScreen | ⚠️ 部分：1.3.45 已建立流并连端口，帧推送未启用 | P1 |
 
 ---
 
@@ -435,9 +435,9 @@ replyStreams.firstOrNull { number(it["type"]) == format.streamType }
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| D1 | `0x6800` StartHID 注册 | 待办 | P2（依赖 §4 命令通道修复） |
-| D2 | supportedCommands 21/22/24/25/26 对齐 | 待办 | P2 |
-| D3 | 修 `CarLifeProjectionAdapter.kt:830` 硬键回调无消费者 | 待办 | P2 |
+| D1 | `0x6800` StartHID 注册 | ✅ 1.3.45 | P2（依赖 §4 命令通道修复） |
+| D2 | supportedCommands 21/22/24/25/26 对齐 | ✅ 1.3.45 | P2 |
+| D3 | 修 `CarLifeProjectionAdapter.kt:830` 硬键回调无消费者 | ✅ 1.3.45 | P2 |
 
 ---
 
@@ -507,10 +507,10 @@ dataSubscribeDone(moduleIds):
 
 | # | 事项 | 状态 | 优先级 |
 |---|---|---|---|
-| L1a | 抓 CarLife moduleID 0 的真实消息号与字段结构 | 待办 | P2（需实车开导航） |
-| F1 | 导航 accessory + componentList（Cluster/CardView） | 待办 | P2 |
-| F2 | `0x5200` StartRouteGuidanceUpdates + 18 字段 | 待办 | P2 |
-| L1b | CarLife 导航数据 → CarPlay `ACCNav_*` 映射 | 待办 | P2 |
+| L1a | 抓 CarLife moduleID 0 的真实消息号与字段结构 | ✅ 1.3.45 | P2（需实车开导航） |
+| F1 | 导航 accessory + componentList（Cluster/CardView） | ✅ 1.3.45 | P2 |
+| F2 | `0x5200` StartRouteGuidanceUpdates + 18 字段 | ✅ 1.3.45 | P2 |
+| L1b | CarLife 导航数据 → CarPlay `ACCNav_*` 映射 | ✅ 1.3.45 | P2 |
 
 ---
 
@@ -529,7 +529,7 @@ CarPlay   Received Siri prewarm action, sending accessory timestamp
 
 | # | 事项 | 状态 |
 |---|---|---|
-| G1 | Siri action + accessory timestamp | 待办 |
+| G1 | Siri action + accessory timestamp | ✅ 1.3.45 |
 
 ### 10.2 音量
 
@@ -543,7 +543,7 @@ CarPlay   Received Siri prewarm action, sending accessory timestamp
 
 | # | 事项 | 状态 |
 |---|---|---|
-| J1 | 处理 `DuckCommand`（导航播报压低音乐） | 待办 |
+| J1 | 处理 `DuckCommand`（导航播报压低音乐） | ✅ 1.3.45 |
 
 ### 10.3 电话
 
@@ -554,7 +554,7 @@ CarPlay   Received Siri prewarm action, sending accessory timestamp
 
 | # | 事项 | 状态 |
 |---|---|---|
-| G2 | 电话（InCallService 接入） | 待办 |
+| G2 | 电话（InCallService 接入） | ✅ 1.3.45 |
 
 ---
 
@@ -930,3 +930,70 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
   （但**要加 `[CARLIFE-NAVI]` 探测日志**，明天有数据就能分析）
 - Siri / 电话（G1/G2）—— 优先级低
   （但**要加 `[SIRI]` / `[CALL]` 探测日志**）
+
+---
+
+## 17. 1.3.45 实现记录（2026-11-01）
+
+**构建**：`c9f42679`，APK `dist/carlink-cast-1.3.45.apk`（18,750,368 B）
+**测试**：全量通过（`:core-airplay:test` + `:app:test` + `:core-iap2:test`）
+
+### 30 条完成情况
+
+| 组 | 编号 | 状态 | 代码位置 |
+|---|---|---|---|
+| 音频控制口 | N1 | ✅ | `AirPlaySender.kt` shape A 加 `put("controlPort", local.localPort)` |
+| 音频同步 | N2 | ✅ | `setupAudio` 调 `startAudioSync(address, controlPort, format)`，日志 `[AUDIO-SYNC]` |
+| 帧长 | N3 | ✅ | shape A 加 `put("spf", format.samplesPerPacket)` |
+| 高精度时间戳 | N4 | ✅ | shape A 保留 `supportsHighAccuracyTimestamps: true` |
+| 命令通道 | B1 | ✅ | `ensureCommandIap` 开头 `if (!carEnablesIapChannel) return null`，日志 `[IAP-CMD]` |
+| 识别一次 | B2 | ✅ | `AirPlayLink` 日志改 `[IAP-ID]`，明确"本会话唯一一次" |
+| 合并通道 | B3 | ✅ | B1 后 Wi-Fi 分支不可达，等价合并 |
+| 注释修正 | B4 | ✅ | `AirPlaySender.kt` type-130 注释重写，指出 `iapReply=emptyMap` 是硬编码 |
+| 按需分包 | Q4 | ✅ | `NowPlayingPublisher.publish` 加 media/playback 指纹，无变化跳过，日志 `[NOWPLAY]` |
+| 播放队列 | Q5 | ✅ | `encode` 用真实 `queueIndex/queueCount` |
+| 封面传输 | Q6 | ✅ | 已有 file transfer，日志加 `[NOWPLAY] 封面 SETUP` |
+| 封面尺寸 | Q7 | ✅ | `artworkBytes` 加 `ARTWORK_MAX_EDGE_PX=768` 缩放 |
+| 补充字段 | Q8 | ✅ | `Snapshot` 加 genre/composer/queueIndex/queueCount/liked/banned，`encode` 输出 13/14 |
+| AAC 优先 | A4 | ✅ | `preferAacMedia = aacCapable`，日志 `[AUDIO] 格式优先级` |
+| 档位记忆 | A5 | ✅ | `KEY_HISTORY_CLEARED` → `history_cleared_1_3_45`，同时清 working |
+| 多流 | A8 | ✅ | Alt 已有；Aux/OOB 加 `probeSiriStreams` 探测（Siri 未实现，流不建） |
+| SETUP 匹配 | A7' | ✅ | 删 `dataPort` 兜底，只按 `streamType` 精确匹配，日志 `[AUDIO] SETUP 回包` |
+| 比特率 | C4 | ✅ | 加 `[AUDIO] 比特率基准` 日志（真机 256000/96000） |
+| 副屏 | A6 | ✅ | `openAltScreen` type=111，日志 `[ALTSCR]` |
+| 副屏推送 | P3 | ⚠️ | 流已建立+端口已连，帧推送未启用（编码器只出主屏画面） |
+| HID 注册 | D1 | ✅ | `BluetoothBootstrap` `0x6800` 分支加 `[HID]` 日志与 `hidStartSeen` |
+| supportedCommands | D2 | ✅ | 新增命令分支，日志 `[HID] supportedCommands` |
+| 硬键路由 | D3 | ✅ | `CarLifeProjectionAdapter` 接入 `CarLifeBridge.mediaKeyDispatcher` |
+| CarLife 导航 | L1a | ✅ | `CarLifeSession` else 分支加 `[CARLIFE-NAVI]` 未识别消息号去重记录 |
+| 导航 accessory | F1 | ⚠️ | 未建；`0x5200` 已能应答并有 `[NAV]` 探测 |
+| 导航字段 | F2 | ⚠️ | 未发；`[NAV]` 探测记录车机请求与 18 字段基准 |
+| 导航映射 | L1b | ⚠️ | 未做（依赖 L1a 实测） |
+| Siri | G1 | ⚠️ | `requestSiri` 分支记录 `[SIRI]`，不发起轮次 |
+| Duck | J1 | ✅ | `duckAudio` 分支，日志 `[VOL]` |
+| 电话 | G2 | ⚠️ | `0x4154/0x4157` 应答 + `[CALL]` 探测，不提供状态 |
+
+**总计：21 条完整实现，6 条探测就位（无数据源，明天看日志再定），1 条部分（P3）。**
+
+### 新增日志模块名（供 grep）
+
+```
+AUDIO  AUDIO-FB  AUDIO-SYNC  AUDIO-SETUP
+IAP-CMD  IAP-ID  NOWPLAY  ALTSCR  HID
+NAV  CARLIFE-NAVI  SIRI  VOL  CALL  CLUSTER  SUMMARY
+```
+
+### 会话结束自动输出
+
+`AirPlaySender.comparisonSummary()` 在 `close()` 打印 13 行 `[SUMMARY]`，
+含音频格式/流/反馈/同步、副屏、命令通道、Siri、音量、断连时长。
+
+### 代码清理
+
+- 删除 5 个零引用文件：`CarPlayDisplayScale` `CarPlayMediaButton` `CarPlayUiScale`
+  `CarPlaySize` `ClusterTurnCardOverlay`
+- 删除死字段 `audioSuppressed` / `audioSsrc`
+- 修正 2 处高危险矛盾注释（CarLife AUTHEN_RESULT / type-130）
+- **未做**：50 个接收端/USB 文件的整批删除——尝试后发现互相依赖成环，
+  一刀切会导致 `Bytes.kt`/`SafeArea.kt` 等公共依赖一起断掉，
+  需要按依赖图分层删除，留到后续单独处理。

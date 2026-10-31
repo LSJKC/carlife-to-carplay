@@ -82,11 +82,18 @@ internal class AudioProfileMemory(context: Context, private val receiver: String
      * judging rule outlive its fix. The rule itself is fixed as well
      * ([AUDIO_PROFILE_REJECT_MIN_PACKETS]); this only clears the damage already
      * on disk, once.
+     *
+     * 1.3.45 re-clears with a new flag key. The 1.3.22 pass had already run on
+     * every install, so entries written after it — including the pairs seen in
+     * `cc1104i` where *both* `102|AAC…` and `100|PCM…` sat in the rejected set
+     * at once, which makes the demotion meaningless — survived into 1.3.44.
+     * A store that believes every profile is refused cannot order anything.
      */
     private fun discardUnreliableHistory() {
         if (prefs.getBoolean(KEY_HISTORY_CLEARED, false)) return
         prefs.edit()
             .remove("$scope:rejected")
+            .remove("$scope:working")
             .putBoolean(KEY_HISTORY_CLEARED, true)
             .apply()
     }
@@ -141,6 +148,6 @@ internal class AudioProfileMemory(context: Context, private val receiver: String
 
     private companion object {
         /** One-time marker: demotions written by the old judging rule are void. */
-        const val KEY_HISTORY_CLEARED = "history_cleared_1_3_22"
+        const val KEY_HISTORY_CLEARED = "history_cleared_1_3_45"
     }
 }

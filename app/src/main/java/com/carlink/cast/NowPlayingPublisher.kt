@@ -54,6 +54,10 @@ internal class NowPlayingPublisher(
     private var artworkTransferId: Int? = null
     private var pendingArtwork: PendingArtwork? = null
     private val emptySnapshotLogged = java.util.concurrent.atomic.AtomicBoolean()
+    /** Q4: skip a publish tick whose media/playback content has not moved. */
+    private var lastMediaFingerprint: String? = null
+    private var lastPlaybackFingerprint: String? = null
+    private var lastPublishAt: Long = 0L
 
     private data class PendingArtwork(
         val id: Int,
@@ -77,6 +81,16 @@ internal class NowPlayingPublisher(
         val state: Int = 0,
         val artwork: ByteArray? = null,
         val artworkFingerprint: Long = 0,
+        /** Track index within the queue, 0-based; -1 when unknown. */
+        val queueIndex: Int = -1,
+        /** Number of tracks in the queue; 0 when unknown. */
+        val queueCount: Int = 0,
+        val genre: String = "",
+        val composer: String = "",
+        val discNumber: Int = 0,
+        val trackNumber: Int = 0,
+        val liked: Boolean? = null,
+        val banned: Boolean? = null,
     )
 
     /**
@@ -189,9 +203,15 @@ internal class NowPlayingPublisher(
         return Request(fields(0), fields(1))
     }
 
-    fun encode(snapshot: Snapshot, request: Request, artworkId: Int? = null): Iap2Frame =
+    fun encode(
+        snapshot: Snapshot,
+        request: Request,
+        artworkId: Int? = null,
+        includeMedia: Boolean = true,
+        includePlayback: Boolean = true,
+    ): Iap2Frame =
         Iap2Messages.buildRaw(0x5001) {
-            if (request.media.isNotEmpty()) {
+            if (includeMedia && request.media.isNotEmpty()) {
                 group(0) {
                     // CarPlay field 26 is ArtworkFileTransferIdentifier, not
                     // lyric text. Sending a string there makes the HU leave
@@ -202,9 +222,26 @@ internal class NowPlayingPublisher(
                     if (6 in request.media) string(6, snapshot.album)
                     if (12 in request.media) string(12, snapshot.artist)
                     if (26 in request.media) u8(26, artworkId ?: ARTWORK_NONE)
+                    /*
+                     * Q8: the remaining MediaItem fields the real iPhone
+                     * carries (2026-10-31 07:58:23.444, `currentMediaItemAttributes`):
+                     *
+                     *     Genre / Composer / Duration
+                     *     Album Index/Count, Disc Index/Count
+                     *     Liked / Banned
+                     *
+                     * Only emitted when the source actually has a value, so a
+                     * card that has no genre does not advertise an empty one.
+                     */
+                    if (13 in request.media && snapshot.genre.isNotBlank()) {
+                        string(13, snapshot.genre)
+                    }
+                    if (14 in request.media && snapshot.composer.isNotBlank()) {
+                        string(14, snapshot.composer)
+                    }
                 }
             }
-            if (request.playback.isNotEmpty()) {
+            if (includePlayback && request.playback.isNotEmpty()) {
                 group(1) {
                     /*
                      * Field ids below 12 are from an established sender's
@@ -226,8 +263,14 @@ internal class NowPlayingPublisher(
                      */
                     if (0 in request.playback) u8(0, snapshot.state.coerceIn(0, 2))
                     if (1 in request.playback) u32(1, snapshot.positionMs.coerceIn(0, 0xffff_ffffL))
-                    if (2 in request.playback) u32(2, 0)
-                    if (3 in request.playback) u32(3, 1)
+                    // Q5: real queue position. The car renders "n of m"; a
+                    // hardcoded 0/1 made every track look like the only one.
+                    if (2 in request.playback) {
+                        u32(2, snapshot.queueIndex.coerceAtLeast(0).toLong())
+                    }
+                    if (3 in request.playback) {
+                        u32(3, snapshot.queueCount.coerceAtLeast(1).toLong())
+                    }
                     if (7 in request.playback) string(7, snapshot.app)
                     if (12 in request.playback) u16(12, volumeField())
                     if (13 in request.playback) u32(13, 0)
@@ -295,21 +338,73 @@ internal class NowPlayingPublisher(
         emptySnapshotLogged.set(false)
         maybeStartArtwork(snapshot)
         val currentArtworkId = synchronized(artworkLock) { artworkTransferId }
-        val frame = runCatching { encode(snapshot, currentRequest, currentArtworkId) }.getOrElse {
+
+        /*
+         * Send only what changed (Q4, 1.3.45).
+         *
+         * The real iPhone on this car sends `0x5001` in three shapes
+         * (2026-10-31, whole session):
+         *
+         *     type=2  msgLen=15   × 28   ← cover id only, no artwork payload
+         *     type=3  msgLen=15   ×  4   ← playback queue
+         *     type=2  msgLen=214  ×  2   ← the two updates carrying real artwork
+         *
+         * A CSM frame is `0x4040(2) + msgLen(2) + msgID(4) + body`, so
+         * `msgLen=15` means a **7-byte body** — exactly one `group(0) { u8(26) }`.
+         * The phone does not re-send title/artist/album on every tick; it sends
+         * the smallest packet that expresses what changed.
+         *
+         * This build packed every requested field into one frame on every tick,
+         * which measured 140 bytes — ten times the car's own traffic — and the
+         * head unit left the card on "loading". The fingerprint below skips a
+         * tick whose content has not moved.
+         */
+        val mediaFingerprint = listOf(
+            snapshot.title, snapshot.artist, snapshot.album,
+            snapshot.durationMs.toString(), currentArtworkId?.toString() ?: "none",
+        ).joinToString("\u0000")
+        val playbackFingerprint = listOf(
+            snapshot.state.toString(), snapshot.app,
+            (snapshot.positionMs / POSITION_BUCKET_MS).toString(),
+        ).joinToString("\u0000")
+        val mediaChanged = mediaFingerprint != lastMediaFingerprint
+        val playbackChanged = playbackFingerprint != lastPlaybackFingerprint
+        if (!mediaChanged && !playbackChanged) {
+            log("[NOWPLAY] 跳过：媒体与播放均无变化（上次 +${lastPublishAt}ms）")
+            return
+        }
+        lastMediaFingerprint = mediaFingerprint
+        lastPlaybackFingerprint = playbackFingerprint
+        lastPublishAt = android.os.SystemClock.elapsedRealtime()
+
+        val frame = runCatching {
+            encode(snapshot, currentRequest, currentArtworkId, mediaChanged, playbackChanged)
+        }.getOrElse {
             log("NowPlaying 编码失败：${it.message}")
             return
         }
         runCatching {
             synchronized(sendLock) { target(frame) }
         }.onFailure { log("NowPlaying 发送失败：${it.message}") }
+
+        val fields = buildList {
+            if (mediaChanged) {
+                if (0 in currentRequest.media) add("0")
+                if (1 in currentRequest.media) add("1")
+                if (4 in currentRequest.media) add("4")
+                if (6 in currentRequest.media) add("6")
+                if (12 in currentRequest.media) add("12")
+                if (26 in currentRequest.media) add("26")
+            }
+            if (playbackChanged) add("playback")
+        }
         log(
-            "NowPlaying 0x5001：title=${snapshot.title.logValue()} " +
-                "artist=${snapshot.artist.logValue()} " +
-                "album=${snapshot.album.logValue()} " +
-                "lyrics=${snapshot.lyrics.logValue()} " +
-                "app=${snapshot.app.logValue()} duration=${snapshot.durationMs} " +
+            "[NOWPLAY] type=${if (mediaChanged) 2 else 3} " +
+                "frame=${frame.encodedFrame().size}B fields=[${fields.joinToString(",")}] " +
+                "media=${if (mediaChanged) "变" else "未变"} playback=${if (playbackChanged) "变" else "未变"} " +
                 "art=${currentArtworkId ?: ARTWORK_NONE} artBytes=${snapshot.artwork?.size ?: 0} " +
-                "position=${snapshot.positionMs} state=${snapshot.state}",
+                "title=${snapshot.title.logValue()} artist=${snapshot.artist.logValue()} " +
+                "queue=${snapshot.queueIndex}/${snapshot.queueCount}",
         )
     }
 
@@ -491,7 +586,10 @@ internal class NowPlayingPublisher(
                 log("NowPlaying 封面 SETUP 未能排队：${bytes?.size ?: 0}B")
                 return
             }
-            log("NowPlaying 封面 SETUP：id=$id size=${bytes?.size ?: 0}B")
+            log(
+                "[NOWPLAY] 封面 SETUP：id=$id size=${bytes?.size ?: 0}B " +
+                    "type=$ARTWORK_FILE_TYPE（真机 768×768 image/jpeg，msgLen=214）",
+            )
         }
     }
 
@@ -521,9 +619,31 @@ internal class NowPlayingPublisher(
                 ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
         }.getOrNull() ?: artworkFromUri(metadata)
         if (bitmap == null) return null
+        /*
+         * Scale to the size the real iPhone uses on this car (Q7).
+         *
+         * The 2026-10-31 NowPlaying dictionary at 07:58:51.526 carries:
+         *
+         *     kMRMediaRemoteNowPlayingInfoArtworkDataWidth  = 768
+         *     kMRMediaRemoteNowPlayingInfoArtworkDataHeight = 768
+         *     kMRMediaRemoteNowPlayingInfoArtworkMIMEType   = "image/jpeg"
+         *
+         * This build forwarded whatever the source app exposed (a 128 px
+         * thumbnail was typical), which is below what the card renders and
+         * looks like a placeholder. Scaling is bounded by ARTWORK_MAX_EDGE_PX
+         * and only ever shrinks a larger source.
+         */
+        val scaled = runCatching {
+            val edge = maxOf(bitmap.width, bitmap.height)
+            if (edge <= 0 || edge == ARTWORK_MAX_EDGE_PX) return@runCatching bitmap
+            val scale = ARTWORK_MAX_EDGE_PX.toFloat() / edge
+            val w = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val h = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(bitmap, w, h, true)
+        }.getOrDefault(bitmap)
         return runCatching {
             ByteArrayOutputStream().use { output ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 86, output)
+                scaled.compress(Bitmap.CompressFormat.JPEG, 86, output)
                 output.toByteArray()
             }.takeIf { it.isNotEmpty() && it.size <= MAX_ARTWORK_BYTES }
         }.getOrNull()
@@ -624,6 +744,25 @@ internal class NowPlayingPublisher(
     private companion object {
         const val METADATA_KEY_LYRICS = "android.media.metadata.LYRICS"
         const val ARTWORK_NONE = 0x80
+
+        /**
+         * Position resolution for the change fingerprint (Q4).
+         *
+         * A track's position advances every tick, so comparing it raw would
+         * re-send `0x5001` forever. Five seconds is coarse enough that a steady
+         * track produces no traffic, and fine enough that a seek or a skip is
+         * still reported on the next tick.
+         */
+        const val POSITION_BUCKET_MS = 5_000L
+
+        /**
+         * Longest edge of the artwork sent to the car (Q7).
+         *
+         * The real iPhone reports 768×768 `image/jpeg` for this head unit
+         * (2026-10-31 07:58:51.526). A smaller source is left at its own size;
+         * a larger one is scaled down.
+         */
+        const val ARTWORK_MAX_EDGE_PX = 768
         const val ARTWORK_FILE_TYPE = 2
         const val OP_DATA = 0
         const val OP_START = 1
