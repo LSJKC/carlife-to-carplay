@@ -102,6 +102,47 @@ class CastSettings(context: Context) {
         set(value) = prefs.edit().putInt(KEY_FRAME_RATE, value.coerceIn(0, 120)).apply()
 
     /**
+     * Extra blank columns inside the usable area, as a percentage of panel width.
+     *
+     * The background still fills the whole panel; only the phone's own content
+     * is pulled inwards, together with the touch mapping. Some head units leave
+     * their own chrome on the left or right edge, and without this the outer
+     * few percent of the phone picture sit underneath it. 0-20%, matching the
+     * range this firmware accepts.
+     */
+    var safeLeftPercent: Int
+        get() = prefs.getInt(KEY_SAFE_LEFT, 0)
+        set(value) = prefs.edit().putInt(KEY_SAFE_LEFT, value.coerceIn(0, 20)).apply()
+
+    var safeRightPercent: Int
+        get() = prefs.getInt(KEY_SAFE_RIGHT, 0)
+        set(value) = prefs.edit().putInt(KEY_SAFE_RIGHT, value.coerceIn(0, 20)).apply()
+
+    /**
+     * Render scale, as a percentage of the panel's native size.
+     *
+     * Below 100% the phone encodes a smaller picture and the car upscales it:
+     * cheaper on the phone and on the link, softer on screen. Above 100% the
+     * opposite. 30-160% matches what the reference UI offers; the encoder is
+     * asked for the scaled size, so this is a real resolution change rather
+     * than a display filter.
+     */
+    var displayScalePercent: Int
+        get() = prefs.getInt(KEY_DISPLAY_SCALE, 100)
+        set(value) = prefs.edit().putInt(KEY_DISPLAY_SCALE, value.coerceIn(30, 160)).apply()
+
+    /**
+     * Minimum gap between touch move events sent to the car, in milliseconds.
+     *
+     * 0 forwards every move. A small gap keeps a drag from flooding the input
+     * path on phones whose touch panel reports faster than the link can carry;
+     * down and up events are never throttled, only moves.
+     */
+    var touchMoveThrottleMs: Int
+        get() = prefs.getInt(KEY_TOUCH_THROTTLE, 0)
+        set(value) = prefs.edit().putInt(KEY_TOUCH_THROTTLE, value.coerceIn(0, 48)).apply()
+
+    /**
      * Forward CarLife's H.264 untouched instead of compositing and re-encoding.
      *
      * Off by default: the compositor is what paints wallpaper outside the safe
@@ -137,6 +178,8 @@ class CastSettings(context: Context) {
             top = prefs.getInt("$scope:top", 0),
             right = prefs.getInt("$scope:right", 0),
             bottom = prefs.getInt("$scope:bottom", 0),
+            extraLeftPercent = safeLeftPercent,
+            extraRightPercent = safeRightPercent,
         )
     }
 
@@ -278,6 +321,10 @@ class CastSettings(context: Context) {
         const val KEY_AUTO_CONNECT = "autoConnect"
         const val KEY_CARLIFE_AUTO_SESSION = "carLifeAutoSession"
         const val KEY_FRAME_RATE = "frameRateOverride"
+    const val KEY_SAFE_LEFT = "safeLeftPercent"
+    const val KEY_SAFE_RIGHT = "safeRightPercent"
+    const val KEY_DISPLAY_SCALE = "displayScalePercent"
+    const val KEY_TOUCH_THROTTLE = "touchMoveThrottleMs"
         const val KEY_SAFE_AREA_ENABLED = "safeAreaEnabled"
         const val KEY_VIDEO_PASSTHROUGH = "videoPassthrough"
         const val KEY_BT = "manualBluetoothAddress"

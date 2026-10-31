@@ -168,7 +168,12 @@ class MainActivity : AppCompatActivity() {
          * functions were not explained. A labelled button says what it opens.
          */
         bar.addView(textButton(getString(R.string.action_protocol)) { showProtocol() })
-        bar.addView(textButton(getString(R.string.action_settings)) { showSettings() }
+        bar.addView(textButton(getString(R.string.action_settings)) {
+            // Settings is a page of its own now: the sheet version crammed
+            // every option into a bottom drawer on top of the driver controls.
+            runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+                .onFailure { showSettings() }
+        }
             .apply { (layoutParams as? LinearLayout.LayoutParams)?.marginStart = dp(8f) })
         return bar
     }

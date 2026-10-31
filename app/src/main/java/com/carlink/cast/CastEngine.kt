@@ -44,6 +44,9 @@ internal class CastEngine(
     fun run(onFailure: (Throwable) -> Unit) {
         try {
             val peer = settings.peerAddress ?: error("请先选择已配对的车机")
+            // Applied before any input can arrive, so the first drag is already
+            // using the configured gap.
+            Dispatch.touchMoveThrottleMs = settings.touchMoveThrottleMs
             // A key bound in an earlier session may be a device id rather than
             // an AirPlay public key; such a value can never verify and would
             // abort every connection, so it is dropped once at startup.

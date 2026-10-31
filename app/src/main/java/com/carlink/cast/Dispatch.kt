@@ -1,5 +1,6 @@
 package com.carlink.cast
 
+import android.os.SystemClock
 import android.view.KeyEvent
 import com.carplay.adapter.PhoneProjectionAdapter
 import com.carplay.sender.HidKeyReport
@@ -16,6 +17,12 @@ import com.carplay.sender.TouchSample
  */
 internal object Dispatch {
     private val contacts = mutableSetOf<Int>()
+
+    /** Minimum gap between forwarded touch-move events; 0 forwards every one. */
+    @Volatile
+    var touchMoveThrottleMs: Int = 0
+
+    private var lastMoveAt = 0L
 
     fun input(command: Map<*, *>, source: PhoneProjectionAdapter, display: SenderDisplay?): Boolean {
         try {
@@ -122,7 +129,19 @@ internal object Dispatch {
                         if (touch.down || previous) {
                             val action = if (!touch.down) 1 else if (previous) 2 else 0
                             val (px, py) = touchToVideo(touch, screen)
-                            if (!px.isNaN() && !py.isNaN()) {
+                            /*
+                             * Down and up are never throttled, only moves.
+                             *
+                             * A phone touch panel reports far faster than the
+                             * input path can carry, and a drag that floods it
+                             * makes the car fall behind the finger. Dropping
+                             * intermediate move samples keeps the endpoints
+                             * exact and the gesture smooth.
+                             */
+                            val throttled = action == 2 && touchMoveThrottleMs > 0 &&
+                                SystemClock.elapsedRealtime() - lastMoveAt < touchMoveThrottleMs
+                            if (!px.isNaN() && !py.isNaN() && !throttled) {
+                                if (action == 2) lastMoveAt = SystemClock.elapsedRealtime()
                                 source.onTouchEvent(action, px, py, touch.id)
                                 CastLog.input()
                             }
@@ -253,5 +272,8 @@ internal object Dispatch {
         else -> value.toString()
     }
 
-    fun reset() = contacts.clear()
+    fun reset() {
+        contacts.clear()
+        lastMoveAt = 0L
+    }
 }
