@@ -441,6 +441,7 @@ class MainActivity : AppCompatActivity() {
             "手机画面可以占用的区域。车机声明的安全区会自动带出来；手动填写后以你填的为准，单位是像素。")
         val modes = listOf(
             CarPanelGeometry.SafeAreaMode.STRICT to "跟随车机",
+            CarPanelGeometry.SafeAreaMode.RELAXED to "舒适(50%)",
             CarPanelGeometry.SafeAreaMode.CUSTOM to "手动填写",
             CarPanelGeometry.SafeAreaMode.OFF to "关闭",
         )
@@ -501,27 +502,43 @@ class MainActivity : AppCompatActivity() {
             fieldsBox.addView(status)
         }
 
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        modes.forEach { (mode, label) ->
-            val button = TextView(this).apply {
-                text = label
-                style(12f, R.color.text_primary)
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                background = pill(R.color.surface_high)
-                isClickable = true
-                setOnClickListener {
-                    settings.saveSafeAreaPolicy(
-                        endpoint = settings.peerAddress,
-                        policy = settings.safeAreaPolicy().copy(mode = mode),
-                    )
-                    paint(mode)
+        /*
+         * Two per row.
+         *
+         * With four options sharing one row and equal weights, "舒适(50%)" was
+         * squeezed until the text clipped. Two rows of two keep every label
+         * readable and the tap targets large.
+         */
+        val modeRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        modes.chunked(2).forEach { pair ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            pair.forEach { (mode, label) ->
+                val button = TextView(this).apply {
+                    text = label
+                    style(12f, R.color.text_primary)
+                    gravity = Gravity.CENTER
+                    includeFontPadding = false
+                    maxLines = 1
+                    background = pill(R.color.surface_high)
+                    isClickable = true
+                    setOnClickListener {
+                        settings.saveSafeAreaPolicy(
+                            endpoint = settings.peerAddress,
+                            policy = settings.safeAreaPolicy().copy(mode = mode),
+                        )
+                        paint(mode)
+                    }
                 }
+                buttons += button
+                row.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
             }
-            buttons += button
-            row.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
+            // Keep the two cells equal when a row holds only one.
+            if (pair.size == 1) {
+                row.addView(View(this), LinearLayout.LayoutParams(0, dp(42f), 1f))
+            }
+            modeRows.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6f) })
         }
-        parts.content.addView(row)
+        parts.content.addView(modeRows)
         parts.content.addView(fieldsBox)
         paint(current.mode)
         return parts.view
@@ -560,7 +577,7 @@ class MainActivity : AppCompatActivity() {
         parts.content.addView(fpsRow)
         paintFps(settings.frameRateOverride.takeIf { it > 0 } ?: 30)
 
-        val rates = listOf(4, 8, 12, 16)
+        val rates = listOf(4, 8, 12, 16, 24)
         val bitrateRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(8f), 0, 0)
