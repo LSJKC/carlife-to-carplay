@@ -153,6 +153,9 @@ internal class BluetoothBootstrap(
         authentication = trust(socket?.isConnected == true && peer.bondState == BluetoothDevice.BOND_BONDED)
         startEpoch(link.session, null)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        // Each round gets a short window; a car that has not synced by then is
+        // not going to, and another attempt is cheaper than waiting.
+        var attemptsLeft = SECOND_ROUND_ATTEMPTS
         while (!endpoint.isDone && !closed.get() && System.nanoTime() < deadline) {
             val slice = minOf(250L, ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1))
             val restarted = runCatching { restart.get(slice, TimeUnit.MILLISECONDS) }.getOrNull()
@@ -170,15 +173,49 @@ internal class BluetoothBootstrap(
             runCatching { receiver?.interrupt() }
             runCatching { session?.close() }
             runCatching { receiver?.join(1000) }
-            val stream = openRestartStream(link.transport, restarted)
+            val stream = runCatching { openRestartStream(link.transport, restarted) }
+                .getOrElse { failure ->
+                    // This used to escape connect() without a word: the session
+                    // simply reported "第二轮 iAP2 同步未完成" with no clue which
+                    // step failed. Say exactly what happened.
+                    log("第二轮打开链路失败：${failure.javaClass.simpleName}: ${failure.message}")
+                    throw failure
+                }
+            log("第二轮链路已打开（初始 ${restarted.size}B），等待 iAP2 同步")
             val next = Iap2Session.phoneBluetooth(stream, profile) { log("iAP2：$it") }
             owned += next
             // The new instance starts in detection mode and must answer the
             // car's marker and SYN before any CSM may be sent; sending 0x1D00
             // early is rejected by the channel itself.
             val remaining = ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)
-            check(next.awaitPhoneBluetoothReady(profile, remaining)) {
-                "第二轮 iAP2 同步未完成"
+            val window = minOf(remaining, SECOND_ROUND_WINDOW_MS)
+            val synced = next.awaitPhoneBluetoothReady(profile, window)
+            log("第二轮同步结束：ready=$synced，窗口=${window}ms，剩余预算=${remaining}ms")
+            if (!synced) {
+                /*
+                 * The lease is dead; reopen it and try the round again rather
+                 * than giving up on the connection.
+                 *
+                 * The B233 capture shows what giving up costs: one attempt that
+                 * never saw the car's SYN left the phone sitting for another
+                 * twenty seconds with the car still repeating its marker, and
+                 * the whole attempt was reported as "第二轮 iAP2 同步未完成".
+                 * The caller treats that as a failed connection, so a single
+                 * missed round ends the session even though the car is still
+                 * talking on the same RFCOMM.
+                 */
+                runCatching { next.close() }
+                attemptsLeft--
+                log("第二轮未同步，重新打开链路（剩余尝试 $attemptsLeft）")
+                if (attemptsLeft <= 0) break
+                runCatching { receiver?.interrupt() }
+                runCatching { session?.close() }
+                runCatching { receiver?.join(1000) }
+                val again = openRestartStream(link.transport, ByteArray(0))
+                val retry = Iap2Session.phoneBluetooth(again, profile) { log("iAP2：$it") }
+                owned += retry
+                startEpoch(retry, expected)
+                continue
             }
             startEpoch(next, expected)
         }
@@ -415,7 +452,19 @@ internal class BluetoothBootstrap(
      * inbound iAP2 frame (`C0237ic`: `this.b = 20000L`). Same number here so a
      * field capture compares like with like.
      */
-    private val IDLE_REBUILD_AFTER_MS = 20_000L
+    private val IDLE_REBUILD_AFTER_MS = 6_000L
+
+    /**
+     * How long one second-round handshake may take before it is abandoned.
+     *
+     * A healthy round on this car family completes in about four seconds
+     * (E2LB: 2354 ms to the car's second SYN). Ten seconds is well past that
+     * without eating the whole connection budget.
+     */
+    private val SECOND_ROUND_WINDOW_MS = 10_000L
+
+    /** How many second-round attempts one connection may spend. */
+    private val SECOND_ROUND_ATTEMPTS = 3
 
 
     private data class Link(
