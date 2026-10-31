@@ -5,6 +5,35 @@
 
 ---
 
+## 1.3.35 — 底栏重做：图标与文字对齐
+
+底栏三个格子的宽高原来是 wrap-content，于是：
+
+- 两个字（「投屏」）和三个字（「连接」）宽度不同，图标不在一条水平线上
+- 文字用默认的 font padding，Android 会在每行上下留额外空间，固定高度的格子里
+  就把字形顶高了，看起来像「斜的」
+
+现在每格固定宽度（weight=1）与固定高度，图标固定 22dp 见方，文字固定 18dp 行高
+并关闭 `includeFontPadding`。选中格用强调色 + 粗体，顺便标出当前在哪一页。
+
+同样的 font padding 问题在其余 7 处居中文本里一起修了。
+
+---
+
+## 1.3.34 — 修 "already has a parent" 崩溃
+
+`settingCard()` 建了外层卡片 `cardView`，把内容容器 `box` 挂上去，却 `return box`。
+调用方再把 `box` 加到页面里时 Android 抛：
+
+```
+IllegalStateException: The specified child already has a parent
+```
+
+现在返回 `CardParts(view, content)`，调用方加 `view`、往 `content` 里放控件。
+五个调用点全部跟着改。
+
+---
+
 ## 1.3.33 — 修复启动闪退
 
 三处，都是 1.3.29 三页布局引入的：

@@ -63,6 +63,8 @@ class MainActivity : AppCompatActivity() {
     private var pager: HorizontalScrollView? = null
     private var pageDots: LinearLayout? = null
     private var currentPage = 0
+    private val dockIcons = mutableListOf<ImageView>()
+    private val dockLabels = mutableListOf<TextView>()
 
     private lateinit var ring: StageRingView
     private lateinit var stageDetail: TextView
@@ -378,14 +380,24 @@ class MainActivity : AppCompatActivity() {
      * what the settings page looked like — four lines of text stacked in the
      * same spot, unreadable.
      */
-    private fun settingCard(title: String, detail: String): LinearLayout {
+    /**
+     * Builds a card and returns both the outer view and its content column.
+     *
+     * The caller must add the **outer** view to a layout. The content column is
+     * already a child of it, so adding that instead throws "The specified child
+     * already has a parent" — which is exactly how this screen crashed when it
+     * returned the column.
+     */
+    private class CardParts(val view: View, val content: LinearLayout)
+
+    private fun settingCard(title: String, detail: String): CardParts {
         val cardView = card(16f)
+        cardView.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10f) }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16f), dp(14f), dp(16f), dp(14f))
         }
         cardView.addView(box, ViewGroup.LayoutParams(-1, -2))
-        cardView.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10f) }
         box.addView(TextView(this).apply {
             text = title
             style(14f, R.color.text_primary, bold = true)
@@ -396,20 +408,20 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(4f), 0, dp(10f))
             setLineSpacing(dp(3f).toFloat(), 1f)
         })
-        return box
+        return CardParts(cardView, box)
     }
 
     private fun actionCard(title: String, detail: String, action: String, onClick: () -> Unit): View {
-        val box = settingCard(title, detail)
-        box.addView(secondaryButton(action).apply { setOnClickListener { onClick() } },
+        val parts = settingCard(title, detail)
+        parts.content.addView(secondaryButton(action).apply { setOnClickListener { onClick() } },
             LinearLayout.LayoutParams(-1, dp(42f)))
-        return box
+        return parts.view
     }
 
     private fun buildToggleCard(title: String, detail: String, value: Boolean, onChanged: (Boolean) -> Unit): View {
-        val box = settingCard(title, detail)
+        val parts = settingCard(title, detail)
         var on = value
-        box.addView(com.google.android.material.materialswitch.MaterialSwitch(this).apply {
+        parts.content.addView(com.google.android.material.materialswitch.MaterialSwitch(this).apply {
             text = if (on) "已开启" else "已关闭"
             isChecked = on
             setTextColor(color(R.color.text_primary))
@@ -419,13 +431,13 @@ class MainActivity : AppCompatActivity() {
                 onChanged(checked)
             }
         }, LinearLayout.LayoutParams(-1, dp(44f)))
-        return box
+        return parts.view
     }
 
     /** Safe area: the same pixel values the old sheet stored, edited in place. */
     private fun buildSafeAreaCard(): View {
         val current = settings.safeAreaPolicy()
-        val box = settingCard("安全区留边",
+        val parts = settingCard("安全区留边",
             "手机画面可以占用的区域。车机声明的安全区会自动带出来；手动填写后以你填的为准，单位是像素。")
         val modes = listOf(
             CarPanelGeometry.SafeAreaMode.STRICT to "跟随车机",
@@ -495,6 +507,7 @@ class MainActivity : AppCompatActivity() {
                 text = label
                 style(12f, R.color.text_primary)
                 gravity = Gravity.CENTER
+                includeFontPadding = false
                 background = pill(R.color.surface_high)
                 isClickable = true
                 setOnClickListener {
@@ -508,15 +521,15 @@ class MainActivity : AppCompatActivity() {
             buttons += button
             row.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
         }
-        box.addView(row)
-        box.addView(fieldsBox)
+        parts.content.addView(row)
+        parts.content.addView(fieldsBox)
         paint(current.mode)
-        return box
+        return parts.view
     }
 
     /** Frame rate and bitrate: plain choices, applied on the spot. */
     private fun buildChoicesCard(): View {
-        val box = settingCard("画面质量与帧率",
+        val parts = settingCard("画面质量与帧率",
             "码率越高越清晰也越吃带宽；帧率 60 更流畅。8 Mbps / 30fps 是默认值。")
         val fpsValues = listOf(30, 60)
         val fpsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -533,6 +546,7 @@ class MainActivity : AppCompatActivity() {
                 text = value.toString() + " fps"
                 style(13f, R.color.text_primary)
                 gravity = Gravity.CENTER
+                includeFontPadding = false
                 background = pill(R.color.surface_high)
                 isClickable = true
                 setOnClickListener {
@@ -543,7 +557,7 @@ class MainActivity : AppCompatActivity() {
             fpsButtons += button
             fpsRow.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
         }
-        box.addView(fpsRow)
+        parts.content.addView(fpsRow)
         paintFps(settings.frameRateOverride.takeIf { it > 0 } ?: 30)
 
         val rates = listOf(4, 8, 12, 16)
@@ -564,6 +578,7 @@ class MainActivity : AppCompatActivity() {
                 text = mbps.toString() + " M"
                 style(12.5f, R.color.text_primary)
                 gravity = Gravity.CENTER
+                includeFontPadding = false
                 background = pill(R.color.surface_high)
                 isClickable = true
                 setOnClickListener {
@@ -574,13 +589,13 @@ class MainActivity : AppCompatActivity() {
             bitrateButtons += button
             bitrateRow.addView(button, LinearLayout.LayoutParams(0, dp(40f), 1f).apply { marginEnd = dp(6f) })
         }
-        box.addView(bitrateRow)
+        parts.content.addView(bitrateRow)
         paintBitrate(settings.videoBitrateMbps)
-        return box
+        return parts.view
     }
 
     private fun buildTouchThrottleCard(): View {
-        val box = settingCard("触摸响应间隔",
+        val parts = settingCard("触摸响应间隔",
             "默认关闭，最跟手。只有画面流畅但触摸明显滞后时才调大；只影响拖动，按下抬起永远立即送达。")
         val values = listOf(0, 8, 16, 24, 48)
         val labels = listOf("关闭", "8ms", "16ms", "24ms", "48ms")
@@ -598,6 +613,7 @@ class MainActivity : AppCompatActivity() {
                 text = labels[index]
                 style(12f, R.color.text_primary)
                 gravity = Gravity.CENTER
+                includeFontPadding = false
                 background = pill(R.color.surface_high)
                 isClickable = true
                 setOnClickListener {
@@ -608,9 +624,9 @@ class MainActivity : AppCompatActivity() {
             buttons += button
             row.addView(button, LinearLayout.LayoutParams(0, dp(40f), 1f).apply { marginEnd = dp(5f) })
         }
-        box.addView(row)
+        parts.content.addView(row)
         paint(settings.touchMoveThrottleMs)
-        return box
+        return parts.view
     }
 
     private fun buildPageIndicator(): View {
@@ -636,10 +652,10 @@ class MainActivity : AppCompatActivity() {
         val pager = pager ?: return
         val width = pageWidth()
         if (width <= 0) return
-        if (width <= 0) return
         val index = ((pager.scrollX + width / 2) / width).coerceIn(0, PAGE_COUNT - 1)
         if (index == currentPage) return
         currentPage = index
+        paintDock()
         pageDots?.let { dots ->
             for (i in 0 until dots.childCount) {
                 dots.getChildAt(i)?.alpha = if (i == index) 1f else 0.4f
@@ -651,6 +667,7 @@ class MainActivity : AppCompatActivity() {
         val pager = pager ?: return
         currentPage = index
         pager.smoothScrollTo(index * pageWidth(), 0)
+        paintDock()
         pageDots?.let { dots ->
             for (i in 0 until dots.childCount) {
                 dots.getChildAt(i)?.alpha = if (i == index) 1f else 0.4f
@@ -658,39 +675,76 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Bottom dock: three equal cells, each an icon over a label.
+     *
+     * Every dimension is fixed rather than wrap-content. With wrap-content the
+     * three cells ended up different widths and heights (a two-character label
+     * is narrower than a three-character one), so the icons sat at different
+     * heights and the labels wandered off the icons' centre line — which reads
+     * as "crooked" even though nothing is actually rotated.
+     *
+     * The selected cell is tinted and its label bold, so the dock also shows
+     * which page is on screen.
+     */
     private fun buildDock(): View {
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(16f), dp(8f), dp(16f), dp(14f))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10f), dp(6f), dp(10f), dp(10f))
             setBackgroundColor(color(R.color.bg))
         }
-        fun item(icon: Int, label: String, onClick: () -> Unit): View =
-            LinearLayout(this).apply {
+        dockLabels.clear()
+        dockIcons.clear()
+        listOf(
+            Triple(R.drawable.ic_cast, "投屏", 0),
+            Triple(R.drawable.ic_settings, getString(R.string.action_settings), 1),
+            Triple(R.drawable.ic_car, "连接", 2),
+        ).forEach { (icon, label, page) ->
+            val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
+                gravity = Gravity.CENTER_HORIZONTAL
                 isClickable = true
                 isFocusable = true
-                setOnClickListener { onClick() }
-                addView(ImageView(this@MainActivity).apply {
-                    setImageResource(icon)
-                    imageTintList = tint(R.color.text_secondary)
-                }, LinearLayout.LayoutParams(dp(22f), dp(22f)))
-                addView(TextView(this@MainActivity).apply {
-                    text = label
-                    style(10.5f, R.color.text_secondary)
-                    setPadding(0, dp(4f), 0, 0)
-                })
+                setPadding(0, dp(8f), 0, dp(8f))
+                setOnClickListener { goToPage(page) }
             }
-
-        // Each dock entry is a peer page, not a pop-up on top of the current
-        // one: tapping switches the pager, swiping does the same.
-        dock.addView(item(R.drawable.ic_cast, "投屏") { goToPage(0) },
-            LinearLayout.LayoutParams(0, -2, 1f))
-        dock.addView(item(R.drawable.ic_settings, getString(R.string.action_settings)) { goToPage(1) },
-            LinearLayout.LayoutParams(0, -2, 1f))
-        dock.addView(item(R.drawable.ic_car, "连接") { goToPage(2) },
-            LinearLayout.LayoutParams(0, -2, 1f))
+            val image = ImageView(this).apply {
+                setImageResource(icon)
+                imageTintList = tint(R.color.text_secondary)
+            }
+            // Fixed 22dp square, centred horizontally by the cell's gravity, so
+            // all three icons share one baseline.
+            cell.addView(image, LinearLayout.LayoutParams(dp(22f), dp(22f)))
+            val text = TextView(this).apply {
+                this.text = label
+                style(11f, R.color.text_secondary)
+                gravity = Gravity.CENTER_HORIZONTAL
+                includeFontPadding = false
+                maxLines = 1
+            }
+            // Fixed height keeps the three labels on the same line; without it
+            // a label that wraps to two lines lifts its icon out of line.
+            cell.addView(text, LinearLayout.LayoutParams(-1, dp(18f)).apply { topMargin = dp(4f) })
+            dock.addView(cell, LinearLayout.LayoutParams(0, dp(58f), 1f))
+            dockIcons += image
+            dockLabels += text
+        }
+        paintDock()
         return dock
+    }
+
+    /** Tints the dock to match [currentPage]. */
+    private fun paintDock() {
+        for (index in 0 until PAGE_COUNT) {
+            val on = index == currentPage
+            val color = color(if (on) R.color.accent else R.color.text_secondary)
+            dockIcons.getOrNull(index)?.imageTintList = ColorStateList.valueOf(color)
+            dockLabels.getOrNull(index)?.let {
+                it.setTextColor(color)
+                it.setTypeface(null, if (on) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            }
+        }
     }
 
     private fun buildTopBar(): View {
@@ -821,6 +875,7 @@ class MainActivity : AppCompatActivity() {
             text = getString(R.string.status_idle_detail)
             style(12.5f, R.color.text_secondary)
             gravity = Gravity.CENTER
+                includeFontPadding = false
             maxLines = 2
             minHeight = dp(38f)
             setLineSpacing(dp(2f).toFloat(), 1f)
@@ -2075,7 +2130,8 @@ class MainActivity : AppCompatActivity() {
         tile.addView(TextView(this).apply {
             text = entry.label
             style(11f, R.color.text_secondary)
-            gravity = Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.CENTER
+            includeFontPadding = false
             setPadding(0, dp(6f), 0, 0)
         }, LinearLayout.LayoutParams(-1, -2))
 
@@ -2313,13 +2369,18 @@ class MainActivity : AppCompatActivity() {
             text = label
             style(13f, R.color.text_primary, bold = true)
             gravity = Gravity.CENTER
+            // Android reserves extra space above and below every text line by
+            // default. In a fixed-height box that pushes the glyphs upward, so
+            // a centred label sits visibly high — which is what made the dock
+            // and this button look crooked.
+            includeFontPadding = false
             setPadding(dp(12f), 0, dp(12f), 0)
             background = pill(R.color.surface_high)
             isClickable = true
             isFocusable = true
             setOnClickListener { onClick() }
         }
-        view.layoutParams = LinearLayout.LayoutParams(-2, dp(36f))
+        view.layoutParams = LinearLayout.LayoutParams(-2, dp(38f))
         return view
     }
 
