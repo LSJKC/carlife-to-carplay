@@ -735,92 +735,136 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 
 > 目标：明天一次测试覆盖尽可能多的待验证项，不要挤牙膏。
 
-### 必须全部完成的修复
+### 必须全部完成的修复（§14 全部 30 条，一条不漏）
 
-| # | 编号 | 内容 | 验证方式 |
+#### P0 断连（§3）
+| # | 编号 | 内容 | 必须有的探测日志 |
 |---|---|---|---|
-| 1 | N1+N2+N3+N4 | 音频 SETUP 加 `controlPort`/`spf`/`supportsHighAccuracyTimestamps` + 恢复 `startAudioSync` | 日志看 `sampleTime` 是否增长 |
-| 2 | A4+A5 | 媒体音频改 AAC 102 + latency 1000 + 清空音频档位「已拒」 | 日志看 `音频协商：type=102` |
-| 3 | B1+B2 | `iAPChannel=0` 不建 Wi-Fi iAP2；识别只做一次 | 界面不再跳回第 6 步 |
-| 4 | Q4+Q5+Q6+Q7 | `0x5001` 按需分包 + `type=3` 队列 + 封面 file transfer + 768×768 | 车机首页媒体卡不再「加载中」 |
-| 5 | A6+P3 | AltScreen 6031（2194×700）推 CarLife 副屏画面 | 副屏出现内容 |
-| 6 | A8+A7' | 四路音频独立 SETUP + 删掉 dataPort 兜底 | 日志看四条流各自端口 |
-| 7 | D1+D3 | `0x6800` HID 注册 + 修硬键回调无消费者 | 方向盘按键有反应 |
+| 1 | N1 | 音频 SETUP 请求加入我方 `controlPort` | `[AUDIO-SETUP] 请求 controlPort=X spf=Y fmt=0xZ` |
+| 2 | N2 | 恢复 `startAudioSync()`，向车机 `controlPort` 发 RTP↔NTP 同步包 | `[AUDIO-SYNC] 同步包 #N seq=X → 端口 Y 成功/失败` |
+| 3 | N3 | 请求补 `spf`（AAC 1024 / PCM 352） | 同上 |
+| 4 | N4 | 请求补 `supportsHighAccuracyTimestamps: true` | 同上 |
 
-### 必须新增的诊断日志
+#### P0 跳回第 6 步（§4）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 5 | B1 | `iAPChannel=0` 时不建 Wi-Fi iAP2，检测包只回显 | `[IAP-CMD] 车机 iAPChannel=N → 建/不建会话` |
+| 6 | B2 | 识别/认证每会话只做一次 | `[IAP-ID] 识别第 N 次（应恒为 1）` |
+| 7 | B3 | 合并两套命令通道实现，删除不可达分支 | `[IAP-CMD] 使用实现=A/B` |
+| 8 | B4 | 修 `AirPlaySender.kt:749-781` 误导性注释 | — |
 
-**目标：明天测试后，能从日志直接判断每一项成败，不需要再猜。**
+#### P1 媒体卡（§5）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 9 | Q4 | `0x5001` 按需分包，常态压到 7 字节 body | `[NOWPLAY] type=2 msgLen=N fields=[...]` |
+| 10 | Q5 | 补 `type=3` PlaybackQueueList 独立包 | `[NOWPLAY] type=3 queue=i/n` |
+| 11 | Q6 | 封面走 file transfer，`0x5001` 只带 ID | `[NOWPLAY] 封面 id=N size=XxY bytes=N 开始/完成` |
+| 12 | Q7 | 封面改 768×768 JPEG + MIMEType + ArtworkIdentifier | 同上 |
+| 13 | Q8 | 补字段 Genre/Composer/Index/Disc/Liked/Banned/PlaybackRate | `[NOWPLAY] 字段覆盖=<列表>` |
 
-#### L-A 音频链路（每 2 秒一次，与车机 feedback 同频）
+#### P1 音频格式与多流（§6）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 14 | A4 | 媒体音频改 AAC(102) + `audioLatencyMs=1000` | `[AUDIO] 协商 type=102 latency=1000` |
+| 15 | A5 | 修复音频档位记忆（清空「已拒」） | `[AUDIO] 档位排序=... 已拒=[...]` |
+| 16 | A8 | 每路独立 SETUP + 独立端口（Main/Alt/Aux/OOB） | `[AUDIO] 流#N type=1xx port=Y 建立` |
+| 17 | A7' | 回包按 `streamType` 匹配，删 dataPort 兜底 | `[AUDIO] SETUP 回包 type=N 匹配=是/否` |
+| 18 | C4 | 比特率 Main 256000 / Alt 96000 | `[AUDIO] bitrate=N` |
+
+#### P1 副屏（§7）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 19 | A6 | 建立 AltScreen 流（端口 6031，2194×700） | `[ALTSCR] SETUP type=111 size=2194x700 → port=6031` |
+| 20 | P3 | 推 CarLife 画面/自定义媒体卡到 AltScreen | `[ALTSCR] 推送模式=X 首帧=N字节` |
+
+#### P2 HID（§8）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 21 | D1 | `0x6800` StartHID 注册 | `[HID] 0x6800 到达 描述符=N字节 已注册` |
+| 22 | D2 | supportedCommands 21/22/24/25/26 | `[HID] supportedCommands=[...]` |
+| 23 | D3 | 修 `CarLifeProjectionAdapter.kt:830` 硬键回调无消费者 | `[HID] 硬键 X → 路由到 Y` |
+
+#### P2 导航（§9）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 24 | L1a | 抓 CarLife moduleID 0 真实消息号与字段 | `[CARLIFE-NAVI] moduleID 0 → 消息号=0xN 原始=N字节` |
+| 25 | F1 | 导航 accessory + componentList | `[NAV] accessory 挂载 Cluster/CardView` |
+| 26 | F2 | `0x5200` + 18 个导航字段 | `[NAV] 收到 0x5200 字段=[...]` |
+| 27 | L1b | CarLife 导航 → CarPlay `ACCNav_*` 映射 | `[NAV] 映射 源字段→ACCNav_X` |
+
+#### P3 Siri / 音量 / 电话（§10）
+| # | 编号 | 内容 | 必须有的探测日志 |
+|---|---|---|---|
+| 28 | G1 | Siri action + accessory timestamp | `[SIRI] action=N timestamp=X` |
+| 29 | J1 | 处理 `DuckCommand` | `[VOL] DuckCommand=X volume=Y` |
+| 30 | G2 | 电话 InCallService 接入 | `[CALL] 订阅 0x4154/0x4157 到达` |
+
+#### 代码清理（§12）
+| 项 | 内容 | 验证 |
+|---|---|---|
+| H1 | 删除 50 个不可达文件（约 8536 行） | 编译通过 |
+| H2 | 修 13 处矛盾注释（3 条高危险优先） | — |
+| H3 | 清死字段 `audioSuppressed` / `audioSsrc` / `receiverFeedbackNanos` | — |
+| H4 | 合并两套命令通道（与 B3 同一件事） | — |
+
+### 必须新增的诊断日志（六组）
+
+#### L-A 音频链路（每 2 秒，与车机 feedback 同频）
 ```
 [AUDIO-FB] t=+12345ms stream=102 sampleTime=1244160 (25.9s) sr=47999.9 drift=+0.1ms
-[AUDIO-FB] 对比：本端已发 1244160 样本 / 车机已播 1244160 样本 / 差 0ms
-[AUDIO-FB] controlPort 本端=57249 车机=6011 同步包已发=12 失败=0
+[AUDIO-FB] 本端已发=1244160 车机已播=1244160 差=0ms
+[AUDIO-SYNC] controlPort 本端=57249 车机=6011 同步包已发=12 失败=0
 ```
 
-#### L-B 命令通道（每次建立/失败）
+#### L-B 命令通道
 ```
-[IAP-CMD] 车机 iAPChannel=0 → 不建立 Wi-Fi iAP2 会话（跳过）
-[IAP-CMD] 检测包 #12 已回显（不建会话）
-[IAP-CMD] 若建立：0x1d00 seq=100 → 等待 0x1d01 ... 8000ms 无响应 → 判定该车不支持
-```
-
-#### L-C 媒体包结构（每次 0x5001）
-```
-[NOWPLAY] type=2 msgLen=15 fields=[26] artworkId=128     ← 与真机同构
-[NOWPLAY] type=3 msgLen=15 fields=[2,3] queue=0/1
-[NOWPLAY] 封面传输 id=128 size=768x768 21062B → 完成
-[NOWPLAY] 跳过发送：无变化（上次 07:58:51）
+[IAP-CMD] 车机 iAPChannel=0 → 不建立 Wi-Fi iAP2 会话
+[IAP-CMD] 检测包 #12 已回显（未建会话）
+[IAP-ID] 识别第 1 次（本会话唯一一次）
 ```
 
-#### L-D 副屏流（每次建立/失败）
+#### L-C 媒体包
 ```
-[ALTSCR] SETUP type=111 (AltScreen) uuid=ca6dc87c... size=2194x700 → 200 dataPort=6031
-[ALTSCR] 端口 6031 已连接，首帧 32706B IDR=true
-[ALTSCR] 推送内容模式=CarLife缩放/自定义媒体卡
+[NOWPLAY] type=2 msgLen=15 fields=[26] artworkId=128   ← 与真机同构
+[NOWPLAY] type=3 msgLen=15 queue=0/1
+[NOWPLAY] 封面 id=128 768x768 21062B → 完成
+[NOWPLAY] 跳过：无变化（上次 07:58:51）
+```
+
+#### L-D 副屏
+```
+[ALTSCR] SETUP type=111 size=2194x700 → 200 dataPort=6031
+[ALTSCR] 端口 6031 已连接 首帧=32706B IDR=true
 ```
 
 #### L-E HID
 ```
-[HID] 0x6800 StartHID 到达 描述符 55B → 已注册
-[HID] 按键事件 0x03 usage=0xB5 down
-[HID] 硬键已路由 → MediaCommandRouter → 音源切换
+[HID] 0x6800 StartHID 描述符=55B → 已注册
+[HID] 按键 usage=0xB5 down → 路由到 MediaCommandRouter
 ```
 
-#### L-F 全量对照表（会话结束时自动输出）
+#### L-F 会话结束全量对照表
 ```
 [SUMMARY] ═══ 本次会话对照 ═══
-[SUMMARY] 音频: 真机 AAC102/6000+6011 | 本机 ?/? | 一致=Y/N
-[SUMMARY] 副屏: 真机 6031/2194x700 | 本机 ?/? | 一致=Y/N
-[SUMMARY] 命令通道: 真机 iAPChannel=0 不建 | 本机 建/不建 | 一致=Y/N
+[SUMMARY] 音频:     真机 AAC102/6000+6011 | 本机 ?/? | 一致=Y/N
+[SUMMARY] 副屏:     真机 6031/2194x700    | 本机 ?/? | 一致=Y/N
+[SUMMARY] 命令通道: 真机 iAPChannel=0 不建 | 本机 ? | 一致=Y/N
+[SUMMARY] 识别次数: 真机 1 | 本机 ? 
 [SUMMARY] sampleTime 增长: 真机 是 | 本机 是/否
-[SUMMARY] 断连: RECORD→reset ?ms（真机 >10min）
-[SUMMARY] 媒体卡: 0x5001 包数=? 封面=?
-[SUMMARY] 按键: 0x6800=到/未到 HID报告数=?
+[SUMMARY] 断连:     RECORD→reset ?ms（真机 >10min）
+[SUMMARY] 媒体卡:   0x5001 包数=? type2=? type3=? 封面=?
+[SUMMARY] 按键:     0x6800=到/未到 HID报告数=?
+[SUMMARY] 导航:     0x5200=到/未到 ACCNav字段数=?
+[SUMMARY] Siri:     action数=? | 电话: 订阅=到/未到 | 音量: Duck=到/未到
 ```
 
-### 修改顺序
+### 日志要求（全部 30 条通用）
 
-```
-1. 先做 P0 断连（N1-N4 + A4/A5）      → 这是核心
-2. 再做 B1/B2（跳回第6步）             → 界面体验
-3. 再做 Q4-Q7（媒体卡）                → 用户可见功能
-4. 再做 A6（副屏）                     → 新功能
-5. 最后 A8/D1（四路音频/HID）          → 补全
-6. 全程插入诊断日志 L-A ~ L-F
-```
-
-### 明天测试需要覆盖的场景
-
-| 场景 | 对应验证 |
-|---|---|
-| 1. 开声音连接 | 断连时间、sampleTime、AAC 是否生效 |
-| 2. 不开声音连接 | 30s 断连是否变化 |
-| 3. 车机首页看媒体卡 | Q4-Q7 效果 |
-| 4. 看副屏 | A6 效果 |
-| 5. 方向盘按键 | D1 效果 |
-| 6. 手机播放音乐+导航 | 导航字段、DuckCommand |
-| 7. 每次结束都导出日志 | L-F 汇总表对比 |
+1. **每一条待办都必须有对应的可观测日志**，不允许「改了但看不出来」
+2. 日志格式统一 `[模块] 内容`，模块名固定：`AUDIO` `AUDIO-FB` `AUDIO-SYNC` `AUDIO-SETUP`
+   `IAP-CMD` `IAP-ID` `NOWPLAY` `ALTSCR` `HID` `NAV` `CARLIFE-NAVI` `SIRI` `VOL` `CALL` `CLUSTER`
+3. 使用现有的 `CastLog.logger(LogChannel.X)` 分通道机制
+4. 会话结束时由 L-F 自动打印对照表，**不需要人工翻日志**
 
 ### 约束条件（必须遵守）
 
