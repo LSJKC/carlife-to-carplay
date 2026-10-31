@@ -22,6 +22,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -58,6 +59,10 @@ class MainActivity : AppCompatActivity() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var settings: CastSettings
+    /** Horizontal pager holding the three top-level pages. */
+    private var pager: HorizontalScrollView? = null
+    private var pageDots: LinearLayout? = null
+    private var currentPage = 0
 
     private lateinit var ring: StageRingView
     private lateinit var stageDetail: TextView
@@ -101,6 +106,17 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------------------------------------------------------- layout
 
+    /**
+     * Three top-level pages, swiped horizontally.
+     *
+     * The settings used to be a separate activity pushed on top of the main
+     * screen, which read as a pop-up over the thing it belongs to. Here every
+     * page is a peer: the same frame, the same title bar, the same dock, and a
+     * horizontal swipe (or a dock tap) moves between them. A plain
+     * HorizontalScrollView does the paging — one child per page, each the
+     * screen width — which avoids pulling in a pager library and keeps each
+     * page's own vertical scrolling exactly as it was.
+     */
     private fun buildScreen(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -108,24 +124,135 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(buildTopBar())
 
-        val scroll = ScrollView(this).apply {
+        pager = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
             isFillViewport = true
-            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setOnScrollChangeListener { _, _, _, _, _ -> updatePageIndicator() }
         }
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20f), dp(4f), dp(20f), dp(28f))
-        }
-        scroll.addView(column, ViewGroup.LayoutParams(-1, -2))
-        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pager!!.addView(strip, ViewGroup.LayoutParams(-2, -1))
 
+        strip.addView(page(buildHomePage()), LinearLayout.LayoutParams(pageWidth(), -1))
+        strip.addView(page(buildSettingsPage()), LinearLayout.LayoutParams(pageWidth(), -1))
+        strip.addView(page(buildConnectPage()), LinearLayout.LayoutParams(pageWidth(), -1))
+        root.addView(pager, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        root.addView(buildPageIndicator())
+        root.addView(buildDock())
+        return root
+    }
+
+    private fun pageWidth(): Int {
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        return if (width > 0) width else dp(360f)
+    }
+
+    /** One page: its own vertical scroll view, clipped to the page width. */
+    private fun page(content: View): View = ScrollView(this).apply {
+        isFillViewport = true
+        isVerticalScrollBarEnabled = false
+        addView(content, ViewGroup.LayoutParams(-1, -2))
+    }
+
+    /** Column with the standard page padding. */
+    private fun pageColumn(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(20f), dp(4f), dp(20f), dp(24f))
+    }
+
+    private fun buildHomePage(): View {
+        val column = pageColumn()
         column.addView(buildDevicePill(), LinearLayout.LayoutParams(-1, -2))
         column.addView(buildHero(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
         column.addView(buildMetricsGrid(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16f) })
         column.addView(buildStageCard(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
         column.addView(buildLogCard(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
-        root.addView(buildDock())
-        return root
+        return column
+    }
+
+    /** Settings live on their own page now, built from the same rows. */
+    private fun buildSettingsPage(): View {
+        val column = pageColumn()
+        column.addView(sectionHeading(getString(R.string.settings_section_display), "画面在车机上的大小、边距与画质。改动多数在下次连接时生效。"))
+        column.addView(buildSafeAreaCard())
+        column.addView(buildChoicesCard())
+        column.addView(sectionHeading(getString(R.string.settings_section_audio), "声音是否从车机播放。"))
+        column.addView(buildToggleCard(
+            getString(R.string.settings_audio), getString(R.string.settings_audio_detail), settings.audio,
+        ) { settings.audio = it })
+        column.addView(sectionHeading(getString(R.string.settings_section_input), "车机屏幕上的触摸如何传回手机。"))
+        column.addView(buildTouchThrottleCard())
+        column.addView(actionCard("触摸服务", "系统需要开启无障碍服务，车机触摸才能被收到。",
+            if (isTouchServiceEnabled()) "已开启" else "去开启") { openAccessibility() })
+        column.addView(actionCard("通知使用权", "读取车机媒体信息（歌名、歌手、封面）需要它。",
+            if (isMediaListenerEnabled()) "已开启" else "去开启") { openMediaListenerSettings() })
+        column.addView(sectionHeading(getString(R.string.settings_section_behavior), "连接前后的行为。"))
+        column.addView(buildToggleCard(
+            getString(R.string.settings_auto_connect), getString(R.string.settings_auto_connect_detail), settings.autoConnect,
+        ) { settings.autoConnect = it })
+        column.addView(buildToggleCard(
+            getString(R.string.settings_carlife_auto_session), getString(R.string.settings_carlife_auto_session_detail), settings.carLifeAutoSession,
+        ) { settings.carLifeAutoSession = it })
+        column.addView(buildToggleCard(
+            getString(R.string.settings_video_passthrough), getString(R.string.settings_video_passthrough_detail), settings.videoPassthrough,
+        ) { settings.videoPassthrough = it })
+        if (settings.sourceMode != SourceMode.MIRROR) {
+            column.addView(actionCard(getString(R.string.settings_wallpaper),
+                "合成画布时安全区外侧显示的背景，共九张。" + wallpaperStatus(), "选择") { showWallpaperSheet() })
+        }
+        column.addView(TextView(this).apply {
+            text = getString(R.string.settings_version, BuildConfig.VERSION_NAME)
+            style(10.5f, R.color.text_tertiary)
+            setPadding(0, dp(18f), 0, 0)
+        })
+        return column
+    }
+
+    /** Connection, pairing and diagnostics. */
+    private fun buildConnectPage(): View {
+        val column = pageColumn()
+        column.addView(sectionHeading("连接", "车机配对、连接引导与故障诊断。"))
+        column.addView(actionCard(
+            getString(R.string.settings_connect_guide),
+            getString(R.string.settings_connect_guide_detail),
+            "打开",
+        ) { openHonorCarConnect() })
+        column.addView(actionCard(
+            "选择车机",
+            "当前：${settings.peerName ?: getString(R.string.device_none)}。点开后可以更换目标车机。",
+            "选择",
+        ) { showPeerSheet() })
+        column.addView(sectionHeading("进阶", "一般不需要改动。"))
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        val currentAddress = adapter?.let { LocalBluetoothAddress.read(this, it, settings.manualBluetoothAddress) }
+        column.addView(actionCard(
+            getString(R.string.settings_bluetooth),
+            currentAddress?.let { getString(R.string.settings_bluetooth_current, it) }
+                ?: getString(R.string.settings_bluetooth_detail),
+            "修改",
+        ) { editBluetoothAddress() })
+        column.addView(actionCard(
+            getString(R.string.settings_clear_pair),
+            getString(R.string.settings_clear_pair_detail),
+            "清除",
+        ) {
+            val peer = selectedPeer()
+            if (peer == null) {
+                toast(getString(R.string.toast_no_peer))
+            } else {
+                settings.removePair(peer.first)
+                settings.clearConnected(peer.first)
+                toast(getString(R.string.toast_pair_cleared))
+            }
+        })
+        column.addView(actionCard(
+            getString(R.string.settings_export),
+            getString(R.string.settings_export_detail),
+            "导出",
+        ) { exportLog() })
+        return column
     }
 
     /**
@@ -136,6 +263,298 @@ class MainActivity : AppCompatActivity() {
      * reported as unfriendly. A dock at the bottom puts every entry within
      * thumb reach and gives each one a label.
      */
+    /** Small heading with a one-line explanation, used at the top of a group. */
+    private fun sectionHeading(title: String, detail: String): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(16f), 0, dp(8f))
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                style(13f, R.color.accent, bold = true)
+                letterSpacing = 0.05f
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = detail
+                style(11.5f, R.color.text_tertiary)
+                setPadding(0, dp(3f), 0, 0)
+                setLineSpacing(dp(3f).toFloat(), 1f)
+            })
+        }
+
+    /** A card holding one labelled control; the page supplies the control. */
+    private fun settingCard(title: String, detail: String): android.view.ViewGroup {
+        val box = card(16f)
+        box.addView(TextView(this).apply {
+            text = title
+            style(14f, R.color.text_primary, bold = true)
+        })
+        box.addView(TextView(this).apply {
+            text = detail
+            style(11.5f, R.color.text_secondary)
+            setPadding(0, dp(4f), 0, dp(10f))
+            setLineSpacing(dp(3f).toFloat(), 1f)
+        })
+        return box
+    }
+
+    private fun actionCard(title: String, detail: String, action: String, onClick: () -> Unit): View {
+        val box = settingCard(title, detail)
+        box.addView(secondaryButton(action).apply { setOnClickListener { onClick() } },
+            LinearLayout.LayoutParams(-1, dp(42f)))
+        return box
+    }
+
+    private fun buildToggleCard(title: String, detail: String, value: Boolean, onChanged: (Boolean) -> Unit): View {
+        val box = settingCard(title, detail)
+        var on = value
+        box.addView(com.google.android.material.materialswitch.MaterialSwitch(this).apply {
+            text = if (on) "已开启" else "已关闭"
+            isChecked = on
+            setTextColor(color(R.color.text_primary))
+            setOnCheckedChangeListener { _, checked ->
+                on = checked
+                text = if (checked) "已开启" else "已关闭"
+                onChanged(checked)
+            }
+        }, LinearLayout.LayoutParams(-1, dp(44f)))
+        return box
+    }
+
+    /** Safe area: the same pixel values the old sheet stored, edited in place. */
+    private fun buildSafeAreaCard(): View {
+        val current = settings.safeAreaPolicy()
+        val box = settingCard("安全区留边",
+            "手机画面可以占用的区域。车机声明的安全区会自动带出来；手动填写后以你填的为准，单位是像素。")
+        val modes = listOf(
+            CarPanelGeometry.SafeAreaMode.STRICT to "跟随车机",
+            CarPanelGeometry.SafeAreaMode.CUSTOM to "手动填写",
+            CarPanelGeometry.SafeAreaMode.OFF to "关闭",
+        )
+        val fieldsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val buttons = mutableListOf<TextView>()
+
+        fun paint(mode: CarPanelGeometry.SafeAreaMode) {
+            buttons.forEachIndexed { index, button ->
+                val picked = modes[index].first == mode
+                button.setTextColor(color(if (picked) R.color.on_accent else R.color.text_primary))
+                button.background = pill(if (picked) R.color.accent else R.color.surface_high)
+            }
+            fieldsBox.removeAllViews()
+            if (mode != CarPanelGeometry.SafeAreaMode.CUSTOM) return
+            val saved = settings.safeAreaPolicy()
+            val labels = listOf("左", "上", "右", "下")
+            val inputs = listOf(saved.left, saved.top, saved.right, saved.bottom)
+                .mapIndexed { index, value ->
+                    EditText(this).apply {
+                        hint = labels[index]
+                        inputType = InputType.TYPE_CLASS_NUMBER
+                        setSingleLine(true)
+                        setText(value.toString())
+                        setTextColor(color(R.color.text_primary))
+                        setHintTextColor(color(R.color.text_tertiary))
+                    }
+                }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(10f), 0, 0)
+            }
+            inputs.forEach {
+                row.addView(it, LinearLayout.LayoutParams(0, dp(50f), 1f).apply { marginEnd = dp(6f) })
+            }
+            fieldsBox.addView(row)
+            val status = TextView(this).apply {
+                text = ""
+                style(11.5f, R.color.accent, bold = true)
+                setPadding(0, dp(8f), 0, 0)
+            }
+            fieldsBox.addView(secondaryButton("保存").apply {
+                setOnClickListener {
+                    fun read(field: EditText, fallback: Int) =
+                        field.text?.toString()?.trim()?.toIntOrNull() ?: fallback
+                    settings.saveSafeAreaPolicy(
+                        endpoint = settings.peerAddress,
+                        policy = saved.copy(
+                            mode = CarPanelGeometry.SafeAreaMode.CUSTOM,
+                            left = read(inputs[0], saved.left),
+                            top = read(inputs[1], saved.top),
+                            right = read(inputs[2], saved.right),
+                            bottom = read(inputs[3], saved.bottom),
+                        ),
+                    )
+                    status.text = "已保存，下次连接生效"
+                }
+            }, LinearLayout.LayoutParams(-1, dp(42f)).apply { topMargin = dp(8f) })
+            fieldsBox.addView(status)
+        }
+
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        modes.forEach { (mode, label) ->
+            val button = TextView(this).apply {
+                text = label
+                style(12f, R.color.text_primary)
+                gravity = Gravity.CENTER
+                background = pill(R.color.surface_high)
+                isClickable = true
+                setOnClickListener {
+                    settings.saveSafeAreaPolicy(
+                        endpoint = settings.peerAddress,
+                        policy = settings.safeAreaPolicy().copy(mode = mode),
+                    )
+                    paint(mode)
+                }
+            }
+            buttons += button
+            row.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
+        }
+        box.addView(row)
+        box.addView(fieldsBox)
+        paint(current.mode)
+        return box
+    }
+
+    /** Frame rate and bitrate: plain choices, applied on the spot. */
+    private fun buildChoicesCard(): View {
+        val box = settingCard("画面质量与帧率",
+            "码率越高越清晰也越吃带宽；帧率 60 更流畅。8 Mbps / 30fps 是默认值。")
+        val fpsValues = listOf(30, 60)
+        val fpsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val fpsButtons = mutableListOf<TextView>()
+        fun paintFps(picked: Int) {
+            fpsButtons.forEachIndexed { index, button ->
+                val on = fpsValues[index] == picked
+                button.setTextColor(color(if (on) R.color.on_accent else R.color.text_primary))
+                button.background = pill(if (on) R.color.accent else R.color.surface_high)
+            }
+        }
+        fpsValues.forEach { value ->
+            val button = TextView(this).apply {
+                text = value.toString() + " fps"
+                style(13f, R.color.text_primary)
+                gravity = Gravity.CENTER
+                background = pill(R.color.surface_high)
+                isClickable = true
+                setOnClickListener {
+                    settings.frameRateOverride = value
+                    paintFps(value)
+                }
+            }
+            fpsButtons += button
+            fpsRow.addView(button, LinearLayout.LayoutParams(0, dp(42f), 1f).apply { marginEnd = dp(6f) })
+        }
+        box.addView(fpsRow)
+        paintFps(settings.frameRateOverride.takeIf { it > 0 } ?: 30)
+
+        val rates = listOf(4, 8, 12, 16)
+        val bitrateRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8f), 0, 0)
+        }
+        val bitrateButtons = mutableListOf<TextView>()
+        fun paintBitrate(picked: Int) {
+            bitrateButtons.forEachIndexed { index, button ->
+                val on = rates[index] == picked
+                button.setTextColor(color(if (on) R.color.on_accent else R.color.text_primary))
+                button.background = pill(if (on) R.color.accent else R.color.surface_high)
+            }
+        }
+        rates.forEach { mbps ->
+            val button = TextView(this).apply {
+                text = mbps.toString() + " M"
+                style(12.5f, R.color.text_primary)
+                gravity = Gravity.CENTER
+                background = pill(R.color.surface_high)
+                isClickable = true
+                setOnClickListener {
+                    settings.videoBitrateMbps = mbps
+                    paintBitrate(mbps)
+                }
+            }
+            bitrateButtons += button
+            bitrateRow.addView(button, LinearLayout.LayoutParams(0, dp(40f), 1f).apply { marginEnd = dp(6f) })
+        }
+        box.addView(bitrateRow)
+        paintBitrate(settings.videoBitrateMbps)
+        return box
+    }
+
+    private fun buildTouchThrottleCard(): View {
+        val box = settingCard("触摸响应间隔",
+            "默认关闭，最跟手。只有画面流畅但触摸明显滞后时才调大；只影响拖动，按下抬起永远立即送达。")
+        val values = listOf(0, 8, 16, 24, 48)
+        val labels = listOf("关闭", "8ms", "16ms", "24ms", "48ms")
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val buttons = mutableListOf<TextView>()
+        fun paint(picked: Int) {
+            buttons.forEachIndexed { index, button ->
+                val on = values[index] == picked
+                button.setTextColor(color(if (on) R.color.on_accent else R.color.text_primary))
+                button.background = pill(if (on) R.color.accent else R.color.surface_high)
+            }
+        }
+        values.forEachIndexed { index, value ->
+            val button = TextView(this).apply {
+                text = labels[index]
+                style(12f, R.color.text_primary)
+                gravity = Gravity.CENTER
+                background = pill(R.color.surface_high)
+                isClickable = true
+                setOnClickListener {
+                    settings.touchMoveThrottleMs = value
+                    paint(value)
+                }
+            }
+            buttons += button
+            row.addView(button, LinearLayout.LayoutParams(0, dp(40f), 1f).apply { marginEnd = dp(5f) })
+        }
+        box.addView(row)
+        paint(settings.touchMoveThrottleMs)
+        return box
+    }
+
+    private fun buildPageIndicator(): View {
+        val dots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4f), 0, dp(2f))
+        }
+        repeat(PAGE_COUNT) { index ->
+            dots.addView(View(this).apply {
+                background = pill(R.color.track)
+                alpha = if (index == 0) 1f else 0.4f
+            }, LinearLayout.LayoutParams(dp(6f), dp(6f)).apply {
+                marginStart = dp(4f)
+                marginEnd = dp(4f)
+            })
+        }
+        pageDots = dots
+        return dots
+    }
+
+    private fun updatePageIndicator() {
+        val pager = pager ?: return
+        val width = pageWidth()
+        if (width <= 0) return
+        val index = ((pager.scrollX + width / 2) / width).coerceIn(0, PAGE_COUNT - 1)
+        if (index == currentPage) return
+        currentPage = index
+        pageDots?.let { dots ->
+            for (i in 0 until dots.childCount) {
+                dots.getChildAt(i)?.alpha = if (i == index) 1f else 0.4f
+            }
+        }
+    }
+
+    private fun goToPage(index: Int) {
+        val pager = pager ?: return
+        currentPage = index
+        pager.smoothScrollTo(index * pageWidth(), 0)
+        pageDots?.let { dots ->
+            for (i in 0 until dots.childCount) {
+                dots.getChildAt(i)?.alpha = if (i == index) 1f else 0.4f
+            }
+        }
+    }
+
     private fun buildDock(): View {
         val dock = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -160,13 +579,13 @@ class MainActivity : AppCompatActivity() {
                 })
             }
 
-        dock.addView(item(R.drawable.ic_car, "选择车机") { showPeerSheet() },
+        // Each dock entry is a peer page, not a pop-up on top of the current
+        // one: tapping switches the pager, swiping does the same.
+        dock.addView(item(R.drawable.ic_cast, "投屏") { goToPage(0) },
             LinearLayout.LayoutParams(0, -2, 1f))
-        dock.addView(item(R.drawable.ic_settings, getString(R.string.action_settings)) {
-            runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
-                .onFailure { showSettings() }
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        dock.addView(item(R.drawable.ic_info, getString(R.string.action_protocol)) { showProtocol() },
+        dock.addView(item(R.drawable.ic_settings, getString(R.string.action_settings)) { goToPage(1) },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        dock.addView(item(R.drawable.ic_car, "连接") { goToPage(2) },
             LinearLayout.LayoutParams(0, -2, 1f))
         return dock
     }
@@ -1928,14 +2347,22 @@ class MainActivity : AppCompatActivity() {
         // already under way and does not depend on that page staying in front;
         // the page only supplies the grant CarLife wants. When the driver
         // leaves it, nothing here needs to be resumed.
+        /*
+         * Open the page first; start the background attempt second.
+         *
+         * These used to be the other way round, with  on the permission
+         * path — so a permission prompt, or any hiccup in starting the session,
+         * produced a button that did nothing at all. Tapping it must always
+         * reach Honor's page; whether a session is also started is a separate
+         * concern that must not be able to block that.
+         */
         if (!CastLog.state.value.running && !pendingCapture) {
             CastLog.event("INFO", "打开荣耀车联的同时在后台开始投屏")
             pendingHonorCarConnect = true
             if (ensurePermissions()) {
                 pendingHonorCarConnect = false
-                requestCaptureIfNeeded()
-            } else {
-                return
+                runCatching { requestCaptureIfNeeded() }
+                    .onFailure { CastLog.event("WARN", "后台开始投屏失败：${it.message}") }
             }
         }
         val candidates = listOf(
@@ -2050,6 +2477,7 @@ class MainActivity : AppCompatActivity() {
     }
 
         private companion object {
+        const val PAGE_COUNT = 3
             const val REQUEST_PERMISSIONS = 21
             const val REQUEST_CAPTURE = 22
             const val REQUEST_EXPORT = 23
@@ -2064,4 +2492,5 @@ class MainActivity : AppCompatActivity() {
              */
             const val HONOR_AUTO_MANAGER = "$HONOR_AUTO_PACKAGE.settings.ManagerActivity"
         }
+
 }
