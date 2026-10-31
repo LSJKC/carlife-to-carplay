@@ -245,6 +245,27 @@ internal class BluetoothBootstrap(
                 val retry = Iap2Session.phoneBluetooth(again, profile) { log("iAP2：$it") }
                 owned += retry
                 runCatching { retry.allowOpenerSynchronization() }
+                /*
+                 * This retry has to negotiate before it speaks.
+                 *
+                 * It used to go straight to startEpoch(), which sends 0x1D00 as
+                 * its first act. On a lease that has not synchronized yet the
+                 * channel rejects that with "CSM send requires a successful
+                 * iAP2 awaitReady", and because that call happens outside the
+                 * per-attempt error handling it escaped connect() and killed
+                 * the whole connection (cc1104g, 12415 ms). The first restart
+                 * path below awaits ready for exactly this reason; so must the
+                 * retry.
+                 */
+                val retryRemaining = ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)
+                val retryWindow = minOf(retryRemaining, SECOND_ROUND_WINDOW_MS)
+                val retrySynced = retry.awaitPhoneBluetoothReady(profile, retryWindow)
+                log("第二轮重试同步结束：ready=$retrySynced，窗口=${retryWindow}ms")
+                if (!retrySynced) {
+                    runCatching { retry.close() }
+                    log("第二轮重试仍未同步，放弃本次连接")
+                    break
+                }
                 startEpoch(retry, expected)
                 continue
             }

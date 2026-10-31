@@ -156,6 +156,14 @@ class Iap2LinkEngine(
     /** See [allowOpenerSynchronization]. */
     @Volatile
     private var openerSynchronizationAllowed = false
+    /**
+     * When the initiator role is claimed if the car has still not sent a SYN.
+     *
+     * Set when a detection marker is echoed on a lease we opened; cleared as
+     * soon as the peer's SYN arrives or the escalation fires.
+     */
+    private var openerEscalationDeadlineMillis: Long? = null
+
     /** See [sendAcknowledgement]: per-transport sequence rule. */
     private val advanceSequenceOnAcknowledgement =
         config.advanceSequenceOnAcknowledgement
@@ -209,6 +217,7 @@ class Iap2LinkEngine(
         synchronizationDeadlineMillis,
         sendAcknowledgementDeadlineMillis,
         receiveAcknowledgementDeadlineMillis,
+        openerEscalationDeadlineMillis,
     ).minOrNull()
 
     /** Starts a link attempt. Wired CarKit uses [wiredInitiator] = true. */
@@ -276,6 +285,29 @@ class Iap2LinkEngine(
                 synchronizationDeadlineMillis?.let { it <= nowMillis } == true -> {
                     synchronizationDeadlineMillis = null
                     if (state == State.NEGOTIATING) {
+                        sendSynchronization()
+                        if (state != State.DEAD) {
+                            synchronizationDeadlineMillis = nowMillis + SYNCHRONIZATION_RESEND_MILLIS
+                        }
+                    }
+                }
+
+                openerEscalationDeadlineMillis?.let { it <= nowMillis } == true -> {
+                    openerEscalationDeadlineMillis = null
+                    /*
+                     * The car never opened. Take the initiator role now.
+                     *
+                     * This is the case cc1104b measured: eight detection
+                     * markers over ten seconds and no SYN, so the round was
+                     * abandoned with both sides waiting. Sending our SYN on
+                     * the *first* marker instead (1.3.41) was wrong on this
+                     * firmware — cc1104g sent it six times and the car never
+                     * answered SYN|ACK. Escalating only after a full silence
+                     * keeps the path that works and still rescues the one
+                     * that used to hang.
+                     */
+                    if (state == State.NEGOTIATING && !peerSynchronizationReceived) {
+                        respondingToPeerSynchronization = true
                         sendSynchronization()
                         if (state != State.DEAD) {
                             synchronizationDeadlineMillis = nowMillis + SYNCHRONIZATION_RESEND_MILLIS
@@ -445,10 +477,28 @@ class Iap2LinkEngine(
                 receive.discard(IAP2_MARKER.size)
                 if (config.startup == Iap2LinkStartup.ACCESSORY_FIRST) {
                     if (config.answerMarkerWithSynchronization && openerSynchronizationAllowed) {
-                        // We opened this lease; the car is waiting for an
-                        // opener, not for its marker back. See the config field.
+                        /*
+                         * Answer the marker the way this car has always
+                         * accepted, then escalate only if it stays silent.
+                         *
+                         * Sending our SYN immediately on the first marker was
+                         * measured and is wrong on this firmware: cc1104g had
+                         * the phone transmit SYN (flags=0x80 seq=99) six times
+                         * over three seconds and the car never answered with
+                         * SYN|ACK — it kept repeating only the six-byte marker,
+                         * the round timed out and the whole connection failed.
+                         *
+                         * The escalation still matters, because the opposite
+                         * failure is real too: cc1104b had the car send eight
+                         * markers over ten seconds and never a SYN. So echo
+                         * first (the path that produced every successful round
+                         * on this car) and only claim the initiator role once
+                         * the car has had a full marker period to open.
+                         */
+                        if (!appendOutput(IAP2_MARKER)) return false
                         respondingToPeerSynchronization = true
-                        enterNegotiating(nowMillis)
+                        enterNegotiating(nowMillis, sendImmediately = false)
+                        openerEscalationDeadlineMillis = nowMillis + OPENER_ESCALATION_MILLIS
                     } else {
                         if (!appendOutput(IAP2_MARKER)) return false
                         // No bare phone SYN: the accessory initiates this profile.
@@ -654,6 +704,8 @@ class Iap2LinkEngine(
             return
         }
         if (state != State.NEGOTIATING) return
+        // The car opened after all; there is nothing left to escalate to.
+        openerEscalationDeadlineMillis = null
         if (config.negotiateControlSession) {
             val control = sync.sessions.firstOrNull { it.kind == 0 && it.version == 2 && it.id != 0 }
             if (sync.maxOutgoing == 0 || sync.maxLength <= HEADER_BYTES + CHECKSUM_BYTES || control == null) {
@@ -961,6 +1013,7 @@ class Iap2LinkEngine(
         synchronizationDeadlineMillis = null
         sendAcknowledgementDeadlineMillis = null
         receiveAcknowledgementDeadlineMillis = null
+        openerEscalationDeadlineMillis = null
         state = State.DEAD
         writable = false
         output.reset()
@@ -1074,6 +1127,14 @@ class Iap2LinkEngine(
         private const val CONTROL_RESET = 0x10
         private const val INITIAL_SEQUENCE = 99
         private const val MARKER_RESEND_MILLIS = 1_000L
+        /**
+         * How long to wait for the car's SYN before claiming the initiator role.
+         *
+         * Two and a half marker periods: the car repeats its marker every
+         * ~1.1 s, and every successful round on this car had its SYN inside
+         * the first period, so by 2.5 s a silent car is not going to open.
+         */
+        private const val OPENER_ESCALATION_MILLIS = 2_500L
         private const val SYNCHRONIZATION_RESEND_MILLIS = 500L
         private const val DEFAULT_RETRANSMISSION_TIMEOUT_MILLIS = 4_000
         private const val DEFAULT_MAX_RETRANSMISSIONS = 4
