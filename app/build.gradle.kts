@@ -59,9 +59,9 @@ android {
         // every build installed as 1.0.0 and an update over an existing install
         // looked like the same version to the package manager — which is what
         // made installing over an older build fail.
-        versionCode = 342
-        versionName = "1.3.42"
-        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.42-342-opener-escalation\"")
+        versionCode = 343
+        versionName = "1.3.43"
+        buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.43-343-cmd-ack-seq\"")
     }
 
     buildFeatures { buildConfig = true }

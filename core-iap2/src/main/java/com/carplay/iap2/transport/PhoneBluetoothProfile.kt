@@ -131,7 +131,31 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
              * above.
              */
             ignoreRepeatedDetectionMarker = this != VIVO_ACCESSORY_FIRST,
-            advanceSequenceOnAcknowledgement = this == COMMAND_TUNNEL,
+            /*
+             * A pure acknowledgement repeats the last sequence on this car.
+             *
+             * This was set to true for COMMAND_TUNNEL on the theory that the
+             * reference sender advances its acknowledgement sequence. Its trace
+             * says the opposite, and the difference is what keeps 0x1d01 from
+             * ever arriving:
+             *
+             *   reference  rx ctl=64 seq=104 ack=99  sid=0 bytes=0
+             *              tx ctl=64 seq=100 ack=104 sid=1 bytes=6   <- 0x1d00
+             *              rx ctl=64 seq=105 ack=100 sid=1 bytes=752 <- 0x1d01
+             *              tx ctl=64 seq=100 ack=105 sid=0 bytes=0   <- pure ACK
+             *              tx ctl=64 seq=101 ack=105 sid=1 bytes=6
+             *
+             *              Every pure ACK reuses the sequence it just answered
+             *              with; only frames carrying a payload advance it.
+             *
+             *   ours       tx ctl=64 seq=100 ack=19  sid=0 bytes=0   <- pure ACK
+             *              tx ctl=64 seq=101 ack=19  sid=1 bytes=16  <- 0x1d00
+             *              car ack=99 forever, 0x1d00 re-sent every 1.7 s
+             *
+             *              Advancing on the pure ACK pushed 0x1d00 from 100 to
+             *              101, and the car never acknowledged anything past 99.
+             */
+            advanceSequenceOnAcknowledgement = false,
             /*
              * Only the Bluetooth accessory-first link answers a marker with a
              * SYN, and only when the lease was opened by us — which on this
