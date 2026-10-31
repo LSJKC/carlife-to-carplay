@@ -99,8 +99,23 @@ class MainActivity : AppCompatActivity() {
         CastLog.initialize(this)
         window.statusBarColor = Color.parseColor("#0B1220")
         window.navigationBarColor = Color.parseColor("#0B1220")
-        setContentView(buildScreen())
-        bindState()
+        /*
+         * A failure building the screen must be readable, not a silent exit.
+         *
+         * The screen is built entirely in code, so one bad layout call takes
+         * the whole activity down before anything is drawn — the app just
+         * disappears with no way to tell which call did it. Building it inside
+         * runCatching and showing the message keeps the failure on screen and
+         * in the journal.
+         */
+        val screen = runCatching { buildScreen() }.getOrElse { failure ->
+            CastLog.event(LogChannel.APP, "FATAL", "界面构建失败：${failure.stackTraceToString()}")
+            buildFailureScreen(failure)
+        }
+        setContentView(screen)
+        runCatching { bindState() }.onFailure {
+            CastLog.event(LogChannel.APP, "FATAL", "状态绑定失败：${it.stackTraceToString()}")
+        }
         refreshPeers()
     }
 
@@ -124,7 +139,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(buildTopBar())
 
-        pager = SnappingPager(this).apply {
+        pager = SnappingPager(this, PAGE_COUNT).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -138,7 +153,7 @@ class MainActivity : AppCompatActivity() {
         // screen on some densities, which is why a sliver of the neighbouring
         // page showed through and a swipe could rest between two pages.
         listOf(buildHomePage(), buildSettingsPage(), buildConnectPage()).forEach { content ->
-            strip.addView(page(content), LinearLayout.LayoutParams(0, -1))
+            strip.addView(page(content), LinearLayout.LayoutParams(pageWidth(), -1))
         }
         pager!!.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             val width = pager!!.width
@@ -165,7 +180,10 @@ class MainActivity : AppCompatActivity() {
      * this layout that was purely mechanical. On release the nearest boundary
      * is chosen and scrolled to.
      */
-    private class SnappingPager(context: android.content.Context) : HorizontalScrollView(context) {
+    private class SnappingPager(
+        context: android.content.Context,
+        private val pageCount: Int,
+    ) : HorizontalScrollView(context) {
         override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
             val handled = super.onTouchEvent(ev)
             if (ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
@@ -173,7 +191,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 val width = width
                 if (width > 0) {
-                    val page = Math.round(scrollX.toFloat() / width).coerceIn(0, PAGE_COUNT - 1)
+                    val page = Math.round(scrollX.toFloat() / width).coerceIn(0, pageCount - 1)
                     smoothScrollTo(page * width, 0)
                 }
             }
@@ -310,6 +328,28 @@ class MainActivity : AppCompatActivity() {
      * reported as unfriendly. A dock at the bottom puts every entry within
      * thumb reach and gives each one a label.
      */
+    /** Last-resort screen: says what failed instead of vanishing. */
+    private fun buildFailureScreen(failure: Throwable): View = ScrollView(this).apply {
+        setBackgroundColor(Color.parseColor("#0B1220"))
+        addView(TextView(this@MainActivity).apply {
+            text = buildString {
+                append("界面构建失败")
+                append(System.lineSeparator())
+                append(System.lineSeparator())
+                append(failure.javaClass.simpleName)
+                append(": ")
+                append(failure.message)
+                append(System.lineSeparator())
+                append(System.lineSeparator())
+                append(failure.stackTraceToString().take(2000))
+            }
+            setTextColor(Color.parseColor("#E6EDF7"))
+            textSize = 12f
+            setPadding(dp(20f), dp(60f), dp(20f), dp(40f))
+            setTextIsSelectable(true)
+        })
+    }
+
     /** Small heading with a one-line explanation, used at the top of a group. */
     private fun sectionHeading(title: String, detail: String): View =
         LinearLayout(this).apply {
@@ -595,6 +635,7 @@ class MainActivity : AppCompatActivity() {
     private fun updatePageIndicator() {
         val pager = pager ?: return
         val width = pageWidth()
+        if (width <= 0) return
         if (width <= 0) return
         val index = ((pager.scrollX + width / 2) / width).coerceIn(0, PAGE_COUNT - 1)
         if (index == currentPage) return
