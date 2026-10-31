@@ -119,12 +119,56 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(column, ViewGroup.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        column.addView(buildDevicePill(), LinearLayout.LayoutParams(-1, dp(46f)))
+        column.addView(buildDevicePill(), LinearLayout.LayoutParams(-1, -2))
         column.addView(buildHero(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
         column.addView(buildMetricsGrid(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16f) })
         column.addView(buildStageCard(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
         column.addView(buildLogCard(), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12f) })
+        root.addView(buildDock())
         return root
+    }
+
+    /**
+     * The bottom dock: the few things a driver reaches for.
+     *
+     * Settings used to be an icon in the top-right corner, which is the least
+     * discoverable position on a phone screen and the first thing that was
+     * reported as unfriendly. A dock at the bottom puts every entry within
+     * thumb reach and gives each one a label.
+     */
+    private fun buildDock(): View {
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16f), dp(8f), dp(16f), dp(14f))
+            setBackgroundColor(color(R.color.bg))
+        }
+        fun item(icon: Int, label: String, onClick: () -> Unit): View =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onClick() }
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(icon)
+                    imageTintList = tint(R.color.text_secondary)
+                }, LinearLayout.LayoutParams(dp(22f), dp(22f)))
+                addView(TextView(this@MainActivity).apply {
+                    text = label
+                    style(10.5f, R.color.text_secondary)
+                    setPadding(0, dp(4f), 0, 0)
+                })
+            }
+
+        dock.addView(item(R.drawable.ic_car, "选择车机") { showPeerSheet() },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        dock.addView(item(R.drawable.ic_settings, getString(R.string.action_settings)) {
+            runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+                .onFailure { showSettings() }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        dock.addView(item(R.drawable.ic_info, getString(R.string.action_protocol)) { showProtocol() },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        return dock
     }
 
     private fun buildTopBar(): View {
@@ -168,18 +212,22 @@ class MainActivity : AppCompatActivity() {
          * functions were not explained. A labelled button says what it opens.
          */
         bar.addView(textButton(getString(R.string.action_protocol)) { showProtocol() })
-        bar.addView(textButton(getString(R.string.action_settings)) {
-            // Settings is a page of its own now: the sheet version crammed
-            // every option into a bottom drawer on top of the driver controls.
-            runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
-                .onFailure { showSettings() }
-        }
-            .apply { (layoutParams as? LinearLayout.LayoutParams)?.marginStart = dp(8f) })
+        // Settings moved to the bottom dock: a top-right corner is the least
+        // discoverable place for the one entry that holds every option.
         return bar
     }
 
+    /**
+     * The car selector, sized to be found.
+     *
+     * It used to be a 46dp strip with a small icon and a name that could be
+     * cut off — easy to miss and easy to mistake for a label rather than a
+     * button. This is now a full-width card: the car name in the largest type
+     * on the screen after the title, its address underneath, and the action
+     * spelled out on the right.
+     */
     private fun buildDevicePill(): View {
-        val pillCard = card(23f).apply {
+        val pillCard = card(18f).apply {
             isClickable = true
             isFocusable = true
             setOnClickListener { showPeerSheet() }
@@ -187,35 +235,51 @@ class MainActivity : AppCompatActivity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14f), 0, dp(5f), 0)
+            setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
         }
         pillCard.addView(row, FrameLayout.LayoutParams(-1, -1))
 
         row.addView(ImageView(this).apply {
             setImageResource(R.drawable.ic_car)
             imageTintList = tint(R.color.accent)
-        }, LinearLayout.LayoutParams(dp(18f), dp(18f)))
+        }, LinearLayout.LayoutParams(dp(26f), dp(26f)))
 
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14f), 0, dp(10f), 0)
+        }
+        texts.addView(TextView(this).apply {
+            text = "投屏到"
+            style(11f, R.color.text_tertiary)
+        })
         deviceName = TextView(this).apply {
             text = getString(R.string.device_none)
-            style(13f, R.color.text_primary)
+            style(17f, R.color.text_primary, bold = true)
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, dp(2f), 0, 0)
         }
-        row.addView(deviceName, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10f) })
+        texts.addView(deviceName)
+        row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
 
+        // Stacked on the right: what the button does, and which source is in
+        // use. Both used to compete for the same strip and neither was legible.
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+        }
+        right.addView(TextView(this).apply {
+            text = "更换"
+            style(12.5f, R.color.accent, bold = true)
+        })
         sourceBadge = TextView(this).apply {
             text = shortSourceLabel(settings.sourceMode)
-            style(10f, R.color.text_secondary)
+            style(10.5f, R.color.text_secondary)
             setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
             background = pill(R.color.track)
         }
-        row.addView(sourceBadge, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(2f) })
-
-        row.addView(iconButton(R.drawable.ic_refresh, getString(R.string.device_refresh), size = 36) {
-            refreshPeers()
-            toast(getString(R.string.toast_refreshed))
-        })
+        right.addView(sourceBadge, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5f) })
+        row.addView(right)
         return pillCard
     }
 
