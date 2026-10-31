@@ -141,7 +141,7 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
              * The Wi-Fi command tunnel is opened by the car sending the marker,
              * and an established sender answers that with the marker alone.
              */
-            answerMarkerWithSynchronization = this == ACCESSORY_FIRST,
+            answerMarkerWithSynchronization = this == ACCESSORY_FIRST || this == COMMAND_TUNNEL,
             maximumInFlightPackets = 1,
         )
     }

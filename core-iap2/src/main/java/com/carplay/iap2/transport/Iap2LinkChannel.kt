@@ -586,7 +586,21 @@ class Iap2LinkChannel private constructor(
                 underlying,
                 PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig().copy(onLinkRestart = onLinkRestart),
                 initiateNegotiation = false, {}, onFileTransferDatagram, onDiagnostic, packetDiagnostics = true,
-            ).also { it.worker.start() }
+            ).also {
+                // The car opens this tunnel with its detection marker and then
+                // waits for *our* SYN. Echoing the marker back (the responder
+                // default) leaves it repeating that marker for the whole
+                // session: measured across five builds and seven sessions, the
+                // command link answered nothing at the CSM layer — `0x1d00`
+                // went out, `0x1d01` never came, and the car's acknowledgement
+                // stopped at the sequence of our first CSM frame.
+                //
+                // A working sender is the initiator here: it answers the marker
+                // and immediately sends its own SYN, and `0x1d01` arrives within
+                // one round trip. Same rule as the Bluetooth second round.
+                it.allowOpenerSynchronization()
+                it.worker.start()
+            }
 
         /**
          * Opens the iAP2 link carried by an AirPlay type-130 tunnel. The accessory initiates
