@@ -34,6 +34,8 @@ class Iap2LinkChannel private constructor(
     private var controlBytes = 0
     /** Set by [allowRepeatedMarkerEcho], consumed by the pump thread. */
     private var allowMarkerEcho = false
+    /** Set by [allowOpenerSynchronization], consumed by the pump thread. */
+    private var allowOpenerSynchronization = false
     private val fileTransfers = Iap2FileTransferReceiver()
     // Bind the existing file protocol to the session declared in this phone profile.
     // Profiles predating an override keep their original session-12 behavior.
@@ -99,6 +101,17 @@ class Iap2LinkChannel private constructor(
     fun allowRepeatedMarkerEcho() {
         synchronized(lock) {
             allowMarkerEcho = true
+            lock.notifyAll()
+        }
+    }
+
+    /**
+     * Queues "this lease was opened by us, so answer the car's marker with our
+     * SYN". See [Iap2LinkEngine.allowOpenerSynchronization].
+     */
+    fun allowOpenerSynchronization() {
+        synchronized(lock) {
+            allowOpenerSynchronization = true
             lock.notifyAll()
         }
     }
@@ -260,6 +273,10 @@ class Iap2LinkChannel private constructor(
             if (allowMarkerEcho) { allowMarkerEcho = false; true } else false
         }
         if (echoNow) engine.allowRepeatedMarkerEcho()
+        val openerNow = synchronized(lock) {
+            if (allowOpenerSynchronization) { allowOpenerSynchronization = false; true } else false
+        }
+        if (openerNow) engine.allowOpenerSynchronization()
         while (engine.writable()) {
             val command = synchronized(lock) {
                 if (commands.isEmpty()) {

@@ -132,6 +132,16 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
              */
             ignoreRepeatedDetectionMarker = this != VIVO_ACCESSORY_FIRST,
             advanceSequenceOnAcknowledgement = this == COMMAND_TUNNEL,
+            /*
+             * Only the Bluetooth accessory-first link answers a marker with a
+             * SYN, and only when the lease was opened by us — which on this
+             * phone means the second iAP2 round, see
+             * [Iap2LinkEngine.allowOpenerSynchronization].
+             *
+             * The Wi-Fi command tunnel is opened by the car sending the marker,
+             * and an established sender answers that with the marker alone.
+             */
+            answerMarkerWithSynchronization = this == ACCESSORY_FIRST,
             maximumInFlightPackets = 1,
         )
     }

@@ -61,6 +61,16 @@ class Iap2Session private constructor(
      */
     fun allowRepeatedMarkerEcho() = channel.allowRepeatedMarkerEcho()
 
+    /**
+     * Marks this session's link as one the phone opened, so the car's detection
+     * marker is answered with our SYN.
+     *
+     * Set on every round after the first: the car answers the first round's
+     * marker itself, but on a lease we reopened it only repeats the marker and
+     * waits. See [Iap2LinkConfig.answerMarkerWithSynchronization].
+     */
+    fun allowOpenerSynchronization() = channel.allowOpenerSynchronization()
+
     fun awaitOutboundAcknowledged(timeoutMillis: Long): Boolean {
         val acknowledged = channel.awaitOutboundAcknowledged(timeoutMillis)
         emitTrace("IAP2 DRAIN [$traceContext] acknowledged=$acknowledged")

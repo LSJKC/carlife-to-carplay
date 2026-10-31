@@ -37,6 +37,9 @@ class Iap2CsmChannel private constructor(
     /** See Iap2LinkEngine.allowRepeatedMarkerEcho. */
     fun allowRepeatedMarkerEcho() = link.allowRepeatedMarkerEcho()
 
+    /** See Iap2LinkEngine.allowOpenerSynchronization. */
+    fun allowOpenerSynchronization() = link.allowOpenerSynchronization()
+
     /** Waits for the underlying link to negotiate a writable session 10. */
     fun awaitReady(timeoutMillis: Long): Boolean {
         requireTimeout(timeoutMillis)

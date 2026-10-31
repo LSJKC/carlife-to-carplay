@@ -153,6 +153,9 @@ class Iap2LinkEngine(
      */
     @Volatile
     private var markerEchoAllowed = false
+    /** See [allowOpenerSynchronization]. */
+    @Volatile
+    private var openerSynchronizationAllowed = false
     /** See [sendAcknowledgement]: per-transport sequence rule. */
     private val advanceSequenceOnAcknowledgement =
         config.advanceSequenceOnAcknowledgement
@@ -441,10 +444,17 @@ class Iap2LinkEngine(
             if (receive.matches(IAP2_MARKER)) {
                 receive.discard(IAP2_MARKER.size)
                 if (config.startup == Iap2LinkStartup.ACCESSORY_FIRST) {
-                    if (!appendOutput(IAP2_MARKER)) return false
-                    // No bare phone SYN: the accessory initiates this profile.
-                    respondingToPeerSynchronization = true
-                    enterNegotiating(nowMillis, sendImmediately = false)
+                    if (config.answerMarkerWithSynchronization && openerSynchronizationAllowed) {
+                        // We opened this lease; the car is waiting for an
+                        // opener, not for its marker back. See the config field.
+                        respondingToPeerSynchronization = true
+                        enterNegotiating(nowMillis)
+                    } else {
+                        if (!appendOutput(IAP2_MARKER)) return false
+                        // No bare phone SYN: the accessory initiates this profile.
+                        respondingToPeerSynchronization = true
+                        enterNegotiating(nowMillis, sendImmediately = false)
+                    }
                 } else enterNegotiating(nowMillis)
                 return true
             }
@@ -825,6 +835,19 @@ class Iap2LinkEngine(
         markerEchoAllowed = true
     }
 
+    /**
+     * Marks this link as one the phone opened itself, so a detection marker
+     * from the car is answered with our SYN instead of our marker.
+     *
+     * Only meaningful on an accessory-first profile configured with
+     * [Iap2LinkConfig.answerMarkerWithSynchronization]. Call it right after
+     * `start()` on every lease after the first one, i.e. whenever the phone —
+     * not the car — was the one that opened the RFCOMM stream.
+     */
+    fun allowOpenerSynchronization() {
+        openerSynchronizationAllowed = true
+    }
+
     private fun sendSynchronization() {
         val answering = respondingToPeerSynchronization && peerSynchronizationReceived
         val control = CONTROL_SYNCHRONIZE or if (answering) CONTROL_ACKNOWLEDGEMENT else 0
@@ -1102,6 +1125,24 @@ data class Iap2LinkConfig(
     val maximumPendingOutputBytes: Int = 1_048_576,
     val maximumPendingEvents: Int = 256,
     val startup: Iap2LinkStartup = Iap2LinkStartup.LEGACY,
+    /**
+     * Whether this side opens the link on a renegotiation it did not start.
+     *
+     * An accessory-first link normally stays silent until the peer sends a
+     * SYN: on the very first round the car is the one that opens, and sending
+     * ours first would collide with it. That rule does not survive a restart
+     * of the same RFCOMM. On the second round the car has been measured
+     * echoing only the six-byte detection marker and then waiting — eight
+     * markers over ten seconds, never a SYN — while this side waits for a SYN
+     * of its own. Both ends sit in NEGOTIATING until the round is abandoned,
+     * and that is the "第一次连接有时能成功有时不能" report: whether the
+     * car happens to send its SYN unprompted decides the attempt.
+     *
+     * With this enabled the detection marker on a link this side opened
+     * itself is answered with our SYN instead of being echoed back, so the
+     * second round always has an opener.
+     */
+    val answerMarkerWithSynchronization: Boolean = false,
     val synchronizationOverride: Iap2LinkEngine.SynchronizationPayload? = null,
     val negotiateControlSession: Boolean = false,
     /**

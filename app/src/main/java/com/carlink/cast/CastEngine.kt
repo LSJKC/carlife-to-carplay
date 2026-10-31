@@ -95,6 +95,7 @@ internal class CastEngine(
                     val token = nowPlaying.subscribeDefault(send, sendFile)
                     log("已在蓝牙链路订阅车机媒体信息：token=$token")
                 },
+                rebindNowPlaying = { send, sendFile -> nowPlaying.rebind(send, sendFile) },
             )
             bluetooth = link
             val result = link.connect()

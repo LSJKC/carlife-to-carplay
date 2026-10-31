@@ -146,6 +146,39 @@ internal class NowPlayingPublisher(
         return token
     }
 
+    /**
+     * Rebinds an existing subscription to a different iAP2 session.
+     *
+     * The car ends the first iAP2 round after 0x4300 and reopens one on the
+     * same RFCOMM, so the session object — and therefore the `send` lambda
+     * captured at subscribe time — belongs to a link that no longer exists.
+     * Publishing on it failed every two seconds for the rest of the session
+     * while the car sat on "正在加载媒体". Keeping the requested field set
+     * and the artwork state, and only swapping the transport, is what a
+     * re-identification on the live link needs.
+     *
+     * Returns false when there is no subscription to rebind.
+     */
+    fun rebind(
+        sender: (Iap2Frame) -> Unit,
+        fileSender: ((ByteArray) -> Boolean)? = null,
+    ): Boolean {
+        synchronized(sendLock) {
+            if (request == null) return false
+            send = sender
+            sendFileTransfer = fileSender
+            // The pending artwork belongs to the dead link's file transfer.
+            synchronized(artworkLock) {
+                pendingArtwork = null
+                artworkTransferId = null
+                artworkFingerprint = 0L
+            }
+            log("NowPlaying 订阅已改绑到新 iAP2 链路（上一轮链路已结束）")
+        }
+        publish()
+        return true
+    }
+
     fun parseRequest(frame: Iap2Frame): Request {
         require(frame.messageId == 0x5000) {
             "Expected StartNowPlayingUpdates, got 0x${frame.messageId.toString(16)}"

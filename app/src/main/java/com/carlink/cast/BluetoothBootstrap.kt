@@ -67,6 +67,15 @@ internal class BluetoothBootstrap(
      */
     private val startNowPlaying: ((send: (com.carplay.iap2.wire.Iap2Frame) -> Unit,
                                    sendFile: (ByteArray) -> Boolean) -> Unit)? = null,
+    /**
+     * Moves an existing media subscription onto a new iAP2 session.
+     *
+     * Called on the second round, which is a different link on the same
+     * RFCOMM. Returns false when nothing was subscribed yet, in which case
+     * [startNowPlaying] is used instead.
+     */
+    private val rebindNowPlaying: ((send: (com.carplay.iap2.wire.Iap2Frame) -> Unit,
+                                    sendFile: (ByteArray) -> Boolean) -> Boolean)? = null,
 ) : AutoCloseable {
 
     data class Result(val endpoint: WirelessEndpoint, val accessoryIdentity: ByteArray)
@@ -89,8 +98,24 @@ internal class BluetoothBootstrap(
     @Volatile private var receiver: Thread? = null
     @Volatile private var linkTransport: PhoneBluetoothSessionTransport? = null
 
-    /** Set once, so a status callback that repeats cannot subscribe twice. */
-    @Volatile private var nowPlayingStarted = false
+    /**
+     * The iAP2 session the media subscription is currently sending on.
+     *
+     * Not a "started" flag. The car ends the first round after 0x4300 and
+     * reopens iAP2 on the same RFCOMM, which builds a *new* Iap2Session — the
+     * old one's link is dead. With a one-shot flag the publisher kept the old
+     * session's `send` reference and every 0x5001 after the restart failed:
+     *
+     *     925   0x5001 sent on round 1 (title/artist/artwork)
+     *     4694  0x4301, second round running
+     *     4936  0x5001 FAILED: 车机在控制阶段重新发送 iAP2 检测包，旧链路已结束
+     *     6941  0x5001 FAILED   (same stale reference)
+     *
+     * The car never received one media update on the live link, which is its
+     * "正在加载媒体" with no title. Rebinding whenever the session instance
+     * changes fixes that.
+     */
+    @Volatile private var nowPlayingBoundTo: Iap2Session? = null
     @Volatile private var authentication: AccessoryAuthentication? = null
 
     private var phoneService: RegisteredRfcommService<BluetoothServerSocket>? = null
@@ -184,6 +209,11 @@ internal class BluetoothBootstrap(
             log("第二轮链路已打开（初始 ${restarted.size}B），等待 iAP2 同步")
             val next = Iap2Session.phoneBluetooth(stream, profile) { log("iAP2：$it") }
             owned += next
+            // This lease is ours, not the car's. On it the car answers our
+            // detection-marker echo with silence and only repeats the marker
+            // (cc1104b: eight markers, ten seconds, no SYN, round abandoned),
+            // so we have to open the negotiation ourselves.
+            runCatching { next.allowOpenerSynchronization() }
             // The new instance starts in detection mode and must answer the
             // car's marker and SYN before any CSM may be sent; sending 0x1D00
             // early is rejected by the channel itself.
@@ -214,6 +244,7 @@ internal class BluetoothBootstrap(
                 val again = openRestartStream(link.transport, ByteArray(0))
                 val retry = Iap2Session.phoneBluetooth(again, profile) { log("iAP2：$it") }
                 owned += retry
+                runCatching { retry.allowOpenerSynchronization() }
                 startEpoch(retry, expected)
                 continue
             }
@@ -324,13 +355,23 @@ internal class BluetoothBootstrap(
              * a receiver that missed the subscription shows an empty media card
              * for the rest of the session.
              */
-            if (status.identified && !nowPlayingStarted) {
+            if (status.identified) {
                 val current = session
-                if (current != null) {
-                    nowPlayingStarted = true
+                if (current != null && current !== nowPlayingBoundTo) {
+                    val previous = nowPlayingBoundTo
+                    nowPlayingBoundTo = current
                     runCatching {
-                        startNowPlaying?.invoke(current::send, current::sendFileTransfer)
-                    }.onFailure { log("订阅车机媒体信息失败：${it.message}") }
+                        // A subscription from the previous round keeps its
+                        // requested fields and only swaps transport; a first
+                        // round has nothing to carry over.
+                        val rebound = previous != null &&
+                            rebindNowPlaying?.invoke(current::send, current::sendFileTransfer) == true
+                        if (!rebound) startNowPlaying?.invoke(current::send, current::sendFileTransfer)
+                        if (rebound) log("NowPlaying 已在第二轮重新绑定，媒体信息改由新链路发布")
+                    }.onFailure {
+                        nowPlayingBoundTo = null
+                        log("订阅车机媒体信息失败：${it.message}")
+                    }
                 }
             }
         },
