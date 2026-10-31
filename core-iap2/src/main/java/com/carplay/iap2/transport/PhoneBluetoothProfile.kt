@@ -99,7 +99,38 @@ enum class PhoneBluetoothProfile(val label: String, val readyTimeoutMillis: Long
              * nothing at the CSM layer, and it is the only place these two
              * settings differ from Bluetooth.
              */
-            ignoreRepeatedDetectionMarker = this == COMMAND_TUNNEL,
+            /*
+             * Echo the marker on every transport, but only while the link is
+             * NORMAL.
+             *
+             * The 1.3.7 versus 1.3.14 comparison was about the handshake: the
+             * car sends a marker while negotiating, and answering it there
+             * keeps a link alive that the car has already abandoned, which
+             * stops the rebuild. That finding still holds.
+             *
+             * This is the other phase. Once the control session is up the car
+             * keeps repeating the marker as a heartbeat, and the old terminal
+             * behaviour called die() on it. Every message queued behind it went
+             * with the link — 0x5001 media updates above all:
+             *
+             *     13388  0x5001 NowPlayingUpdate FAILED:
+             *            车机在控制阶段重新发送 iAP2 检测包，旧链路已结束
+             *     13389  NowPlaying 发送失败
+             *
+             * That is why the media card sits on "正在加载" and why the session
+             * ends at 13.1 s: the link dies on a heartbeat.
+             *
+             * Ignoring the marker during negotiation is unchanged — the flag
+             * only reaches the NORMAL-state branch.
+             */
+            /*
+             * vivo keeps the terminal behaviour: its fixtures assert that a
+             * repeated marker ends the link (PhoneBluetoothHandshakeTest
+             * vivoReady cases), and that firmware has not been observed sending
+             * one mid-session. Every other profile echoes it — see the comment
+             * above.
+             */
+            ignoreRepeatedDetectionMarker = this != VIVO_ACCESSORY_FIRST,
             advanceSequenceOnAcknowledgement = this == COMMAND_TUNNEL,
             maximumInFlightPackets = 1,
         )
