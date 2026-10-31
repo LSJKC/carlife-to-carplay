@@ -34,6 +34,9 @@ class Iap2CsmChannel private constructor(
 
     fun handshakeStatus(): Iap2HandshakeStatus = link.handshakeStatus()
 
+    /** See Iap2LinkEngine.allowRepeatedMarkerEcho. */
+    fun allowRepeatedMarkerEcho() = link.allowRepeatedMarkerEcho()
+
     /** Waits for the underlying link to negotiate a writable session 10. */
     fun awaitReady(timeoutMillis: Long): Boolean {
         requireTimeout(timeoutMillis)

@@ -32,6 +32,8 @@ class Iap2LinkChannel private constructor(
     private var commandBytes = 0
     private val controls = ArrayDeque<ByteArray>()
     private var controlBytes = 0
+    /** Set by [allowRepeatedMarkerEcho], consumed by the pump thread. */
+    private var allowMarkerEcho = false
     private val fileTransfers = Iap2FileTransferReceiver()
     // Bind the existing file protocol to the session declared in this phone profile.
     // Profiles predating an override keep their original session-12 behavior.
@@ -88,6 +90,19 @@ class Iap2LinkChannel private constructor(
      * the bounded command queue is full.  A peer LSP length violation is discovered by the worker
      * when it reaches the engine and terminates the channel.
      */
+    /**
+     * Queues "start echoing repeated detection markers".
+     *
+     * The pump thread owns the engine, so the switch travels through the same
+     * queue everything else uses instead of being poked from another thread.
+     */
+    fun allowRepeatedMarkerEcho() {
+        synchronized(lock) {
+            allowMarkerEcho = true
+            lock.notifyAll()
+        }
+    }
+
     fun sendControl(bytes: ByteArray): Boolean {
         require(bytes.size <= Iap2LinkEngine.MAX_PAYLOAD_BYTES) {
             "iAP2 control payload exceeds ${Iap2LinkEngine.MAX_PAYLOAD_BYTES} bytes"
@@ -240,6 +255,11 @@ class Iap2LinkChannel private constructor(
     }
 
     private fun drainCommands(engine: Iap2LinkEngine) {
+        // Applied on the pump thread, before any queued payload goes out.
+        val echoNow = synchronized(lock) {
+            if (allowMarkerEcho) { allowMarkerEcho = false; true } else false
+        }
+        if (echoNow) engine.allowRepeatedMarkerEcho()
         while (engine.writable()) {
             val command = synchronized(lock) {
                 if (commands.isEmpty()) {

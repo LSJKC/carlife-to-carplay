@@ -83,6 +83,15 @@ class PhoneBootstrap(
     private val transportIdentifier: () -> String = { identifier },
     expectedAccessoryIdentity: ByteArray? = null,
     private val purpose: PhoneBootstrapPurpose = PhoneBootstrapPurpose.WIRELESS_CONFIGURATION,
+    /**
+     * Called once the car has answered with its wireless configuration.
+     *
+     * From that moment a repeated detection marker is a heartbeat rather than
+     * the car asking for a rebuild, so the link may start echoing it. Before
+     * that point an echo keeps an abandoned link alive and the session dies on
+     * the watchdog instead of taking the second round the car wants.
+     */
+    private val onSessionEstablished: () -> Unit = {},
 ) {
     private val expectedAccessoryIdentity = expectedAccessoryIdentity?.copyOf()
     private var identified = false
@@ -119,6 +128,8 @@ class PhoneBootstrap(
     private var lastReportedStatus: BootstrapStatus? = null
     /** Index into [CHALLENGE_LENGTHS]; advanced by [retryChallengeWithNextLength]. */
     private var challengeAttempt = 0
+    /** True once 0x4301 has arrived in this session. */
+    private var sessionEstablished = false
 
     /**
      * Starts (or resumes) the bootstrap in the order this transport expects.
@@ -273,6 +284,7 @@ class PhoneBootstrap(
         accessorySends = emptySet()
         identification = null
         lastReportedStatus = null
+        sessionEstablished = false
     }
 
 
@@ -457,6 +469,10 @@ class PhoneBootstrap(
                     "carPlaySDK=${AccessoryVersionInfo.safe(incoming.carPlaySdkVersion)}")
                 val merged = endpoint?.merge(incoming) ?: incoming
                 if (merged != endpoint) { endpoint = merged; onStage("无线配置已接收"); onEndpoint(merged) }
+                if (frame.messageId == 0x4301 && !sessionEstablished) {
+                    sessionEstablished = true
+                    runCatching { onSessionEstablished() }
+                }
             }
             0x5700 -> send(Iap2Messages.buildRaw(0x5701) { u8(0, 2) })
             else -> onOther(frame)

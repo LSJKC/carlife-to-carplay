@@ -53,6 +53,14 @@ class Iap2Session private constructor(
         return ready
     }
 
+    /**
+     * Turns on heartbeat echo for a repeated detection marker.
+     *
+     * Called by the bootstrap once the wireless configuration has arrived —
+     * before that an echo keeps alive a link the car has already abandoned.
+     */
+    fun allowRepeatedMarkerEcho() = channel.allowRepeatedMarkerEcho()
+
     fun awaitOutboundAcknowledged(timeoutMillis: Long): Boolean {
         val acknowledged = channel.awaitOutboundAcknowledged(timeoutMillis)
         emitTrace("IAP2 DRAIN [$traceContext] acknowledged=$acknowledged")

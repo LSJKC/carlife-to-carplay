@@ -463,11 +463,27 @@ class PhoneBluetoothHandshakeTest {
         while (engine.pollEvent() != null) Unit
         assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
 
-        // E2LB repeats this marker while the command tunnel is already alive.
-        // It must not be mistaken for a peer-detection restart.
+        /*
+         * A repeated marker before the session is established must neither end
+         * the link nor be echoed.
+         *
+         * Ending it is what 1.3.9 did and it broke other firmware. Echoing it
+         * before 0x4301 is what 1.3.31 did, and the B233 capture shows the cost:
+         * the car takes the echo as "still alive", never starts the second
+         * round it wants, and the handshake dies twenty seconds later with
+         * "第二轮 iAP2 同步未完成".
+         */
         engine.feed(marker, 4)
         assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
         assertNull(engine.pollEvent())
+        assertArrayEquals(byteArrayOf(), engine.takeOutput())
+
+        // Once the session is established the same marker is a heartbeat and is
+        // answered, so a session that already works keeps working.
+        engine.allowRepeatedMarkerEcho()
+        engine.feed(marker, 5)
+        assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
+        assertArrayEquals(marker, engine.takeOutput())
     }
 
     @Test fun responderAdvertisesPhoneLimitsAndWaitsForMatchingConfirmation() {

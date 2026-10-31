@@ -130,6 +130,29 @@ class Iap2LinkEngine(
     private var peerSynchronizationSequence: Int? = null
     private var controlSessionId = CONTROL_SESSION_ID
     private var sentSequence = INITIAL_SEQUENCE
+    /**
+     * Whether a repeated detection marker should be echoed *right now*.
+     *
+     * The profile flag says which firmware tolerates an echo at all; this says
+     * whether the session has actually got past the point where the car wants
+     * a rebuild.
+     *
+     * Field evidence from this head unit family:
+     *
+     *   before 0x4301 is answered  → echo keeps a link the car has abandoned;
+     *                                it never starts the second round and the
+     *                                session dies on the watchdog
+     *                                (B233, 2026-11-01: 20 s of silence, then
+     *                                "第二轮 iAP2 同步未完成")
+     *   after the car is running   → echo is a heartbeat, and refusing it kills
+     *                                the link and drops every queued message,
+     *                                0x5001 media above all
+     *
+     * Set to true by [allowRepeatedMarkerEcho] once the wireless configuration
+     * has arrived.
+     */
+    @Volatile
+    private var markerEchoAllowed = false
     /** See [sendAcknowledgement]: per-transport sequence rule. */
     private val advanceSequenceOnAcknowledgement =
         config.advanceSequenceOnAcknowledgement
@@ -359,11 +382,32 @@ class Iap2LinkEngine(
                      * marker ends the link there, and that firmware has not
                      * been observed sending one mid-session.
                      */
-                    if (config.ignoreRepeatedDetectionMarker) {
+                    if (config.ignoreRepeatedDetectionMarker && markerEchoAllowed) {
                         receive.discard(IAP2_MARKER.size)
                         if (!appendOutput(IAP2_MARKER)) return false
                         markerEchoes += 1
                         reportPacket("MARKER-ECHOED", Header(9, CONTROL_ACKNOWLEDGEMENT, 0, 0, 0))
+                        discarded = true
+                        continue
+                    }
+                    /*
+                     * Before the session is established: consume the marker and
+                     * stay quiet.
+                     *
+                     * Neither of the previous two behaviours is right here.
+                     * Calling die() ends a link the car is still willing to
+                     * use; echoing it tells the car the link is healthy, so it
+                     * never starts the second round it actually wants — the
+                     * B233 capture shows exactly that, twenty seconds of
+                     * silence followed by "第二轮 iAP2 同步未完成".
+                     *
+                     * Discarding it does neither: the link stays usable and the
+                     * car still owns the decision to restart it. Once 0x4301
+                     * arrives the echo is turned on and this branch is no
+                     * longer reached.
+                     */
+                    if (config.ignoreRepeatedDetectionMarker) {
+                        receive.discard(IAP2_MARKER.size)
                         discarded = true
                         continue
                     }
@@ -768,6 +812,17 @@ class Iap2LinkEngine(
         }
         sendData(next.sequence, next.sessionId, next.payload)
         receiveAcknowledgementDeadlineMillis = secondDeadline ?: next.deadlineMillis
+    }
+
+    /**
+     * Lets a repeated detection marker be echoed as a heartbeat.
+     *
+     * Called once the session is established — specifically when the wireless
+     * configuration (0x4301) has arrived. Before that the echo must stay off:
+     * see [markerEchoAllowed].
+     */
+    fun allowRepeatedMarkerEcho() {
+        markerEchoAllowed = true
     }
 
     private fun sendSynchronization() {

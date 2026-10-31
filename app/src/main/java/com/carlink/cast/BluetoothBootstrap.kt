@@ -300,6 +300,11 @@ internal class BluetoothBootstrap(
         profile = PhoneBootstrapProfile.MODERN_WIRELESS,
         transportIdentifier = { transportIdentifier },
         expectedAccessoryIdentity = expected,
+        // 0x4301 is the point after which this car expects a live session
+        // rather than a rebuild. Only then may a repeated detection marker be
+        // echoed; before it, an echo keeps an abandoned link alive and the
+        // handshake never completes.
+        onSessionEstablished = { runCatching { current.allowRepeatedMarkerEcho() } },
     )
 
     /**
