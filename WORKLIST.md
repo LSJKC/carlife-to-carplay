@@ -728,3 +728,102 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 | V2 | `controlPort` 成对修复后断连是否消失 | 装包实车验证 |
 | V3 | AltScreen 6031 推送画面车机是否接受 | 装包实车验证 |
 | V4 | 音频 SETUP 改 AAC 后 `sampleTime` 是否增长 | 装包实车验证 |
+
+---
+
+## 16. 目标：1.3.45 全量修改（2026-11-01 夜）
+
+> 目标：明天一次测试覆盖尽可能多的待验证项，不要挤牙膏。
+
+### 必须全部完成的修复
+
+| # | 编号 | 内容 | 验证方式 |
+|---|---|---|---|
+| 1 | N1+N2+N3+N4 | 音频 SETUP 加 `controlPort`/`spf`/`supportsHighAccuracyTimestamps` + 恢复 `startAudioSync` | 日志看 `sampleTime` 是否增长 |
+| 2 | A4+A5 | 媒体音频改 AAC 102 + latency 1000 + 清空音频档位「已拒」 | 日志看 `音频协商：type=102` |
+| 3 | B1+B2 | `iAPChannel=0` 不建 Wi-Fi iAP2；识别只做一次 | 界面不再跳回第 6 步 |
+| 4 | Q4+Q5+Q6+Q7 | `0x5001` 按需分包 + `type=3` 队列 + 封面 file transfer + 768×768 | 车机首页媒体卡不再「加载中」 |
+| 5 | A6+P3 | AltScreen 6031（2194×700）推 CarLife 副屏画面 | 副屏出现内容 |
+| 6 | A8+A7' | 四路音频独立 SETUP + 删掉 dataPort 兜底 | 日志看四条流各自端口 |
+| 7 | D1+D3 | `0x6800` HID 注册 + 修硬键回调无消费者 | 方向盘按键有反应 |
+
+### 必须新增的诊断日志
+
+**目标：明天测试后，能从日志直接判断每一项成败，不需要再猜。**
+
+#### L-A 音频链路（每 2 秒一次，与车机 feedback 同频）
+```
+[AUDIO-FB] t=+12345ms stream=102 sampleTime=1244160 (25.9s) sr=47999.9 drift=+0.1ms
+[AUDIO-FB] 对比：本端已发 1244160 样本 / 车机已播 1244160 样本 / 差 0ms
+[AUDIO-FB] controlPort 本端=57249 车机=6011 同步包已发=12 失败=0
+```
+
+#### L-B 命令通道（每次建立/失败）
+```
+[IAP-CMD] 车机 iAPChannel=0 → 不建立 Wi-Fi iAP2 会话（跳过）
+[IAP-CMD] 检测包 #12 已回显（不建会话）
+[IAP-CMD] 若建立：0x1d00 seq=100 → 等待 0x1d01 ... 8000ms 无响应 → 判定该车不支持
+```
+
+#### L-C 媒体包结构（每次 0x5001）
+```
+[NOWPLAY] type=2 msgLen=15 fields=[26] artworkId=128     ← 与真机同构
+[NOWPLAY] type=3 msgLen=15 fields=[2,3] queue=0/1
+[NOWPLAY] 封面传输 id=128 size=768x768 21062B → 完成
+[NOWPLAY] 跳过发送：无变化（上次 07:58:51）
+```
+
+#### L-D 副屏流（每次建立/失败）
+```
+[ALTSCR] SETUP type=111 (AltScreen) uuid=ca6dc87c... size=2194x700 → 200 dataPort=6031
+[ALTSCR] 端口 6031 已连接，首帧 32706B IDR=true
+[ALTSCR] 推送内容模式=CarLife缩放/自定义媒体卡
+```
+
+#### L-E HID
+```
+[HID] 0x6800 StartHID 到达 描述符 55B → 已注册
+[HID] 按键事件 0x03 usage=0xB5 down
+[HID] 硬键已路由 → MediaCommandRouter → 音源切换
+```
+
+#### L-F 全量对照表（会话结束时自动输出）
+```
+[SUMMARY] ═══ 本次会话对照 ═══
+[SUMMARY] 音频: 真机 AAC102/6000+6011 | 本机 ?/? | 一致=Y/N
+[SUMMARY] 副屏: 真机 6031/2194x700 | 本机 ?/? | 一致=Y/N
+[SUMMARY] 命令通道: 真机 iAPChannel=0 不建 | 本机 建/不建 | 一致=Y/N
+[SUMMARY] sampleTime 增长: 真机 是 | 本机 是/否
+[SUMMARY] 断连: RECORD→reset ?ms（真机 >10min）
+[SUMMARY] 媒体卡: 0x5001 包数=? 封面=?
+[SUMMARY] 按键: 0x6800=到/未到 HID报告数=?
+```
+
+### 修改顺序
+
+```
+1. 先做 P0 断连（N1-N4 + A4/A5）      → 这是核心
+2. 再做 B1/B2（跳回第6步）             → 界面体验
+3. 再做 Q4-Q7（媒体卡）                → 用户可见功能
+4. 再做 A6（副屏）                     → 新功能
+5. 最后 A8/D1（四路音频/HID）          → 补全
+6. 全程插入诊断日志 L-A ~ L-F
+```
+
+### 明天测试需要覆盖的场景
+
+| 场景 | 对应验证 |
+|---|---|
+| 1. 开声音连接 | 断连时间、sampleTime、AAC 是否生效 |
+| 2. 不开声音连接 | 30s 断连是否变化 |
+| 3. 车机首页看媒体卡 | Q4-Q7 效果 |
+| 4. 看副屏 | A6 效果 |
+| 5. 方向盘按键 | D1 效果 |
+| 6. 手机播放音乐+导航 | 导航字段、DuckCommand |
+| 7. 每次结束都导出日志 | L-F 汇总表对比 |
+
+### 放弃项（明天不测）
+
+- 导航 CarLife 数据（L1a）—— 需要实车开 CarLife 导航单独抓包
+- Siri / 电话（G1/G2）—— 优先级低
+- 代码清理（§12）—— 不影响功能
