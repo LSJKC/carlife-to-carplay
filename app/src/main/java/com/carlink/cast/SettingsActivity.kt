@@ -104,16 +104,6 @@ class SettingsActivity : AppCompatActivity() {
          * keys, the same pixel units — and the older sheet keeps working.
          */
         page.addView(safeAreaCard())
-        page.addView(slider(
-            title = "投屏清晰度",
-            detail = "100% 是车机原生分辨率。调低画面更省性能但会变软，调高更清晰但更吃带宽。" +
-                "（此项暂未生效：改动编码尺寸会被部分车机判为不匹配而拒绝连接，等验证后再开启。）",
-            value = settings.displayScalePercent,
-            min = 30,
-            max = 160,
-            suffix = "%",
-        ) { settings.displayScalePercent = it })
-
         page.addView(choiceRow(
             title = "画面质量（码率）",
             detail = "带宽换清晰度。8 Mbps 是默认，也是长期实测能稳住的值；" +

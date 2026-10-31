@@ -116,19 +116,6 @@ class CastSettings(context: Context) {
         set(value) = prefs.edit().putInt(KEY_BITRATE_MBPS, value.coerceIn(4, 24)).apply()
 
     /**
-     * Render scale, as a percentage of the panel's native size.
-     *
-     * Below 100% the phone encodes a smaller picture and the car upscales it:
-     * cheaper on the phone and on the link, softer on screen. Above 100% the
-     * opposite. 30-160% matches what the reference UI offers; the encoder is
-     * asked for the scaled size, so this is a real resolution change rather
-     * than a display filter.
-     */
-    var displayScalePercent: Int
-        get() = prefs.getInt(KEY_DISPLAY_SCALE, 100)
-        set(value) = prefs.edit().putInt(KEY_DISPLAY_SCALE, value.coerceIn(30, 160)).apply()
-
-    /**
      * Minimum gap between touch move events sent to the car, in milliseconds.
      *
      * 0 forwards every move. A small gap keeps a drag from flooding the input
@@ -316,7 +303,6 @@ class CastSettings(context: Context) {
         const val KEY_AUTO_CONNECT = "autoConnect"
         const val KEY_CARLIFE_AUTO_SESSION = "carLifeAutoSession"
         const val KEY_FRAME_RATE = "frameRateOverride"
-    const val KEY_DISPLAY_SCALE = "displayScalePercent"
     const val KEY_BITRATE_MBPS = "videoBitrateMbps"
     const val KEY_TOUCH_THROTTLE = "touchMoveThrottleMs"
         const val KEY_SAFE_AREA_ENABLED = "safeAreaEnabled"
