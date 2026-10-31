@@ -997,3 +997,21 @@ NAV  CARLIFE-NAVI  SIRI  VOL  CALL  CLUSTER  SUMMARY
 - **未做**：50 个接收端/USB 文件的整批删除——尝试后发现互相依赖成环，
   一刀切会导致 `Bytes.kt`/`SafeArea.kt` 等公共依赖一起断掉，
   需要按依赖图分层删除，留到后续单独处理。
+
+---
+
+## 18. GitHub 已推送（2026-11-01）
+
+```
+master  → 6a896230e65fd26980eac7efcb582135199cb941
+tag     → v1.3.45（同一提交）
+远端     → github.com/LSJKC/carlife-to-carplay
+```
+
+推送前检查：
+- 工作区干净
+- 全量测试通过（`test` 全绿）
+- 提交历史与代码无第三方项目名、无敏感凭据
+- `WORKLIST.md` 已脱敏（移除参考实现名与反编译包名）
+
+**⚠ 凭据提醒**：PAT 曾以命令行形式出现，建议用完后到 GitHub 撤销并重发。
