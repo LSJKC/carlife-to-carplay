@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(buildTopBar())
 
-        pager = HorizontalScrollView(this).apply {
+        pager = SnappingPager(this).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -133,9 +133,23 @@ class MainActivity : AppCompatActivity() {
         val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         pager!!.addView(strip, ViewGroup.LayoutParams(-2, -1))
 
-        strip.addView(page(buildHomePage()), LinearLayout.LayoutParams(pageWidth(), -1))
-        strip.addView(page(buildSettingsPage()), LinearLayout.LayoutParams(pageWidth(), -1))
-        strip.addView(page(buildConnectPage()), LinearLayout.LayoutParams(pageWidth(), -1))
+        // Width is fixed once the pager itself has been measured; using the
+        // display metric up front produced pages a few pixels wider than the
+        // screen on some densities, which is why a sliver of the neighbouring
+        // page showed through and a swipe could rest between two pages.
+        listOf(buildHomePage(), buildSettingsPage(), buildConnectPage()).forEach { content ->
+            strip.addView(page(content), LinearLayout.LayoutParams(0, -1))
+        }
+        pager!!.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val width = pager!!.width
+            if (width <= 0) return@addOnLayoutChangeListener
+            for (index in 0 until strip.childCount) {
+                val child = strip.getChildAt(index)
+                if (child.layoutParams.width != width) {
+                    child.layoutParams = (child.layoutParams as LinearLayout.LayoutParams).apply { this.width = width }
+                }
+            }
+        }
         root.addView(pager, LinearLayout.LayoutParams(-1, 0, 1f))
 
         root.addView(buildPageIndicator())
@@ -143,10 +157,43 @@ class MainActivity : AppCompatActivity() {
         return root
     }
 
+    /**
+     * A horizontal pager that always settles on a page boundary.
+     *
+     * A plain HorizontalScrollView stops wherever the fling ends, which left
+     * the settings page half on screen and half off — the one complaint about
+     * this layout that was purely mechanical. On release the nearest boundary
+     * is chosen and scrolled to.
+     */
+    private class SnappingPager(context: android.content.Context) : HorizontalScrollView(context) {
+        override fun onTouchEvent(ev: android.view.MotionEvent): Boolean {
+            val handled = super.onTouchEvent(ev)
+            if (ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
+                ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL
+            ) {
+                val width = width
+                if (width > 0) {
+                    val page = Math.round(scrollX.toFloat() / width).coerceIn(0, PAGE_COUNT - 1)
+                    smoothScrollTo(page * width, 0)
+                }
+            }
+            return handled
+        }
+    }
+
+    /**
+     * Width of one page: the pager's measured width, falling back to the
+     * display only before the first layout pass.
+     *
+     * Using the display metric alone can be a few pixels off on some densities,
+     * and every pixel of mismatch shows up as the neighbouring page peeking in
+     * at the edge of the screen.
+     */
     private fun pageWidth(): Int {
-        val metrics = resources.displayMetrics
-        val width = metrics.widthPixels
-        return if (width > 0) width else dp(360f)
+        val measured = pager?.width ?: 0
+        if (measured > 0) return measured
+        val display = resources.displayMetrics.widthPixels
+        return if (display > 0) display else dp(360f)
     }
 
     /** One page: its own vertical scroll view, clipped to the page width. */
@@ -282,8 +329,23 @@ class MainActivity : AppCompatActivity() {
         }
 
     /** A card holding one labelled control; the page supplies the control. */
-    private fun settingCard(title: String, detail: String): android.view.ViewGroup {
-        val box = card(16f)
+    /**
+     * A card with a title, an explanation, and room for one control.
+     *
+     * The children go into a vertical LinearLayout, not straight into the
+     * MaterialCardView: that view is a FrameLayout, so every direct child is
+     * placed at (0,0) and they all draw on top of each other. That is exactly
+     * what the settings page looked like — four lines of text stacked in the
+     * same spot, unreadable.
+     */
+    private fun settingCard(title: String, detail: String): LinearLayout {
+        val cardView = card(16f)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16f), dp(14f), dp(16f), dp(14f))
+        }
+        cardView.addView(box, ViewGroup.LayoutParams(-1, -2))
+        cardView.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10f) }
         box.addView(TextView(this).apply {
             text = title
             style(14f, R.color.text_primary, bold = true)
