@@ -2,18 +2,35 @@ package com.carplay.sender
 
 /** Ownership derives from requests and notifications; packets being sent are not ownership proof. */
 class SessionModes {
-    private data class Resource(var owner: Long = 1, var permanent: Long = 1)
+    private data class Resource(var owner: Long = 2, var permanent: Long = 2)
 
     /*
-     * Screen starts with the phone, audio with the car.
+     * Both resources start on the car, exactly as the head unit opens a session.
      *
-     * These look swapped relative to the car's initialPermanentEntity, but they
-     * are what makes the session work: the phone has to own the screen for the
-     * video worker to release frames at all, and the car has to hold audio so
-     * that the explicit claim after the audio SETUP is a real ownership
-     * *transition*. Starting with audio already on the phone meant no
-     * transition was ever announced and the car never switched its audio
-     * route — packets went out and nothing was heard.
+     * A real iPhone on this very car (BUICK_2874, sysdiagnose 2026-10-31 07:58)
+     * prints its ownership trajectory and it does not start on the phone:
+     *
+     *     07:58:22.535  Initial modes : Car Take screen (priority Nice), Take mainAudio
+     *     07:58:22.535  Modes changed: screen Car (permanent: Car), mainAudio Car (permanent: Car)
+     *     07:58:22.545  Modes changed: screen Car (permanent: Car), mainAudio iOS (permanent: Car)
+     *     07:58:23.493  Modes changed: screen iOS (permanent: iOS), mainAudio iOS (permanent: Car)
+     *
+     * Two things in that trace matter:
+     *
+     *  - the phone never owns the screen at declaration time; it takes it about
+     *    a second *after* the audio SETUP, as a real transition the car sees;
+     *  - `mainAudio` keeps `permanent: Car` for the whole session even while the
+     *    phone owns it. [claimScreen] and the audio claim below therefore move
+     *    `owner` only.
+     *
+     * Starting the screen on the phone with `permanent: iOS` skipped that
+     * transition: the car was told the phone already had the screen, so the
+     * changeModes it sends when it takes the screen for its own UI
+     * ("Car Take screen (priority User)") arrived out of order. In the field
+     * that showed up as the screen flipping Car/iOS twice and the session being
+     * reset 13.1 s after RECORD (cc1104l 11797 → 13004 → reset 20856), while the
+     * same car's real iPhone did the same flips at 42.7 s and 47.6 s and simply
+     * kept running.
      */
     private val resources = mutableMapOf(1L to Resource(), 2L to Resource(2, 2))
     /** Result of a changeModes request, split by resource so callers cannot reclaim audio on a screen restore. */
@@ -91,7 +108,15 @@ class SessionModes {
     @Synchronized fun ownsScreen() = resources.getValue(1).owner == 1L
     @Synchronized fun ownsAudio() = resources.getValue(2).owner == 1L
     @Synchronized fun audio(phone: Boolean) {
-        resources.getValue(2).apply { owner = if (phone) 1 else 2; permanent = owner }
+        /*
+         * Only `owner` moves. The real iPhone on this car keeps
+         * `mainAudio (permanent: Car)` for the entire session — 07:58:22.545
+         * through 07:58:53.149 in the 2026-10-31 capture, every single line —
+         * while `owner` goes Car → iOS → iOS. Moving `permanent` with it told
+         * the car the phone had claimed audio for good, so the car's own
+         * "borrow it back" requests came out of order with our snapshot.
+         */
+        resources.getValue(2).owner = if (phone) 1 else 2
     }
 
     /**

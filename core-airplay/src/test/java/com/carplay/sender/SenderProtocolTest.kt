@@ -190,7 +190,15 @@ class SenderProtocolTest {
     @Test fun resourceTransfersMatchReferenceAndRejectedBatchIsAtomic() {
         val state = SessionModes()
         fun change(type: Int) = state.change(mapOf("type" to "changeModes", "params" to mapOf("resources" to listOf(mapOf("resourceID" to 1, "transferType" to type)))))
-        assertTrue(state.ownsScreen()); assertFalse(state.ownsAudio())
+        /*
+         * A session opens with both resources on the car — that is what a real
+         * iPhone reports on this car at 07:58:22.535, before it claims anything.
+         * The transfers below therefore start from the car's side.
+         */
+        assertFalse(state.ownsScreen()); assertFalse(state.ownsAudio())
+        change(3); assertFalse(state.ownsScreen())
+        change(4); assertFalse(state.ownsScreen())   // permanent is still the car
+        state.claimScreen(); assertTrue(state.ownsScreen())
         change(3); assertFalse(state.ownsScreen()); change(4); assertTrue(state.ownsScreen())
         change(1); change(3); change(4); assertFalse(state.ownsScreen()); change(2); assertTrue(state.ownsScreen())
         assertThrows(IllegalArgumentException::class.java) { state.change(mapOf("type" to "changeModes", "params" to mapOf("resources" to listOf(mapOf("resourceID" to 1,"transferType" to 1),mapOf("resourceID" to 999,"transferType" to 1))))) }
@@ -198,6 +206,7 @@ class SenderProtocolTest {
     }
     @Test fun resourceRestoreIdentifiesScreenAndAudioSeparately() {
         val state = SessionModes()
+        state.claimScreen()
         val screen = state.change(mapOf("type" to "changeModes", "params" to mapOf("resources" to listOf(mapOf("resourceID" to 1, "transferType" to 3)))) )
         assertFalse(screen.screenRestored)
         assertFalse(screen.audioRestored)
@@ -256,7 +265,16 @@ class SenderProtocolTest {
             .map { it as Map<*, *> }
             .first { (it["resourceID"] as Number).toLong() == 2L }
         assertEquals(1L, (grantedAudio["entity"] as Number).toLong())
-        assertEquals(1L, (grantedAudio["permanentEntity"] as Number).toLong())
+        /*
+         * `permanentEntity` stays on the car.
+         *
+         * A real iPhone on this car keeps `mainAudio (permanent: Car)` for the
+         * whole session while `owner` moves to iOS — every `Modes changed` line
+         * from 07:58:22.545 to 07:58:53.149 in the 2026-10-31 sysdiagnose says
+         * so. Moving both together claimed audio permanently, which does not
+         * match what the car observes from a genuine phone.
+         */
+        assertEquals(2L, (grantedAudio["permanentEntity"] as Number).toLong())
         assertTrue(state.ownsAudio())
     }
 

@@ -871,16 +871,15 @@ class AirPlaySender(
         // The reference Buick-E5 flow declares ownership before screen SETUP,
         // prepares the source, then starts its encoder only after RECORD.
         //
-        // The screen has to be claimed, not assumed. This car's /info starts
-        // with the screen owned by the head unit (initialPermanentEntity 2), so
-        // a snapshot that leaves it there is telling the car the phone does not
-        // want to display — and the video worker drops every frame while
-        // ownsScreen() is false. Claiming here is what makes the picture appear
-        // at all; the car can still take the screen back later through
-        // changeModes, which is handled separately.
-        if (modes.claimScreen()) {
-            events.diagnostic("会话开始：已申请屏幕资源由手机显示")
-        }
+        // The declaration is sent with both resources on the car, which is the
+        // state a real iPhone reports on this very car (2026-10-31 07:58:22.535
+        // `screen Car (permanent: Car), mainAudio Car (permanent: Car)`). The
+        // phone claims the screen a moment later, after the audio SETUP, so the
+        // car sees a real transition rather than being told at declaration
+        // time that the phone already had it.
+        //
+        // The screen is still claimed before any frame is released: the video
+        // worker drops every frame while ownsScreen() is false.
         if (enableAudio && !modes.ownsAudio()) setAudioOwnership(true)
         wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
         events.diagnostic(
@@ -981,6 +980,22 @@ class AirPlaySender(
                         events.diagnostic("音频流已建立，重新声明音频资源由手机播放")
                     }
                 }
+                /*
+                 * Take the screen here, not before SETUP.
+                 *
+                 * The real iPhone on this car does exactly this and in this
+                 * order: it declares both resources on the car, claims audio,
+                 * and only then moves the screen — 07:58:22.535 (screen Car) →
+                 * 07:58:22.545 (audio iOS) → 07:58:23.493 (screen iOS), one
+                 * second apart, each a transition the car sees. Declaring the
+                 * screen already claimed at 22.5 s instead made the car's own
+                 * "Car Take screen (priority User)" request arrive against a
+                 * state it never observed, which is the flip pair that
+                 * preceded the 13.1 s reset in cc1104l.
+                 */
+                if (modes.claimScreen()) {
+                    events.diagnostic("音频与屏幕流已建立：申请屏幕资源由手机显示")
+                }
                 wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
             }.onFailure {
                 events.diagnostic("音频所有权声明失败：${it.message}")
@@ -1029,6 +1044,22 @@ class AirPlaySender(
             // activate it without delaying the screen watchdog.
             wire.request("RECORD", "/")
             startAudioWorker()
+        } else {
+            /*
+             * No audio stream to wait for, so the screen claim still has to
+             * happen — just once, here. It is the same transition the reference
+             * phone makes after its audio SETUP; with audio disabled there is
+             * no such SETUP, so the screen would otherwise stay on the car and
+             * the video worker would drop every frame.
+             */
+            runCatching {
+                if (modes.claimScreen()) {
+                    events.diagnostic("未启用音频：申请屏幕资源由手机显示")
+                }
+                wire.request("POST", "/command", encode(modes.snapshot()), plistHeaders)
+            }.onFailure {
+                events.diagnostic("屏幕所有权声明失败：${it.message}")
+            }
         }
 
         run("carplay-video-send") {
