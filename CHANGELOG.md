@@ -5,6 +5,34 @@
 
 ---
 
+## 1.3.28 — 取消与失败时立刻断开蓝牙
+
+**车机卡很久才退出，是因为我们关蓝牙关得太晚。**
+
+现场日志：
+
+```
+18766ms  车机已断开（Connection reset）
+18964ms  我们还在做会话快照、交还资源
+19158ms  蓝牙 iAP2 才关闭        ← 车机早就不等了
+21446ms  车机自动重连并重新开始
+```
+
+原来的关闭顺序是 AirPlay → 画面来源 → Wi-Fi → **蓝牙最后**。前三步都会阻塞：
+关 AirPlay 要等 worker 退出，释放画面来源在 `runBlocking` 里跑 `stopProjection()`。
+车机观察不到这些，它唯一立刻有反应的是 RFCOMM 断开——而它排在了最后。
+
+现在两处都改成**最先**断蓝牙：
+
+- **用户取消**：`CastService.stopSession()` 在调用者线程上先调 `disconnectBluetoothNow()`，
+  再去排队做剩下的清理
+- **连接失败**：`onFailure` 回调里第一件事就是断蓝牙，车机能立刻显示失败而不是等超时
+- `CastEngine.close()` 的顺序也改成蓝牙优先
+
+`disconnectBluetoothNow()` 只关 iAP2 那条 RFCOMM，Android 蓝牙配对、A2DP/HFP 不受影响。
+
+---
+
 ## 1.3.27 — ACK 序号把发送窗口堵死了
 
 **1.3.26 让纯 ACK 递增序号，但没让它算作已确认，结果窗口被自己占满。**

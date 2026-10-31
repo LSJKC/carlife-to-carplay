@@ -101,6 +101,13 @@ class CastService : Service() {
             worker.execute {
                 session.run { failure ->
                     if (!stopping.get()) {
+                        // The car learns "this attempt failed" the same way it
+                        // learns about a cancel: the Bluetooth link goes away.
+                        // Dropping it here keeps a failed attempt from sitting
+                        // on the head unit's screen until its own watchdog
+                        // expires, which is what made a bad connect look like
+                        // a hung one.
+                        runCatching { session.disconnectBluetoothNow() }
                         CastLog.stop(failure.message ?: failure.javaClass.simpleName)
                         notifyFailure(failure)
                     }
@@ -327,6 +334,11 @@ class CastService : Service() {
     private fun stopSession(reason: String) {
         if (!stopping.compareAndSet(false, true)) return
         CastLog.stop(reason)
+        // Drop the Bluetooth link here, on the caller's thread, before queueing
+        // the rest. The car treats RFCOMM close as "the phone is gone" and
+        // updates its own screen within a second; everything queued below can
+        // take hundreds of milliseconds and must not delay that signal.
+        runCatching { engine?.disconnectBluetoothNow() }
         runCatching {
             cleanup.execute {
                 engine?.close()

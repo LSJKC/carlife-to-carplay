@@ -158,8 +158,47 @@ internal class CastEngine(
             CastLog.event("INFO", "已绑定车机认证公钥")
         }
 
+    /**
+     * Closes the Bluetooth link only, as fast as the caller's thread allows.
+     *
+     * The service calls this the moment the driver cancels, on whatever thread
+     * the request arrived, before the rest of the teardown is queued. The full
+     * [close] can block on AirPlay worker joins and `stopProjection()`, and the
+     * car has no way to observe any of that — what it reacts to is the RFCOMM
+     * socket disappearing.
+     *
+     * Idempotent: closing an already-closed link is a no-op.
+     */
+    fun disconnectBluetoothNow() {
+        runCatching { bluetooth?.close() }
+        bluetooth = null
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        /*
+         * Bluetooth goes first, and it is not a detail.
+         *
+         * Everything below this line can block: closing AirPlay joins workers,
+         * releasing the source runs `stopProjection()` inside `runBlocking`, and
+         * the Wi-Fi lease teardown waits on the system. The car has no way to
+         * observe any of that — the one thing it reacts to immediately is the
+         * RFCOMM socket going away. Closing it last meant the head unit sat on
+         * a live-looking session for as long as this call took:
+         *
+         *     18766ms  car reset the event channel
+         *     18964ms  we were still snapshotting and handing back resources
+         *     19158ms  Bluetooth finally closed          (392 ms after the car)
+         *     21446ms  the car reconnected and started again by itself
+         *
+         * Closing it first makes the cancel visible to the car in the same
+         * breath as the button press. The earlier ordering reasoned that a car
+         * which loses Bluetooth mid-teardown would reset the session before the
+         * Wi-Fi side finished — but at this point the session is already being
+         * torn down, and a reset is exactly what the driver asked for.
+         */
+        runCatching { bluetooth?.close() }
+        bluetooth = null
         runCatching { airplay?.close() }
         airplay = null
         // CarLife may have been warmed up before AirPlay was created, or an
@@ -170,10 +209,6 @@ internal class CastEngine(
             .onFailure { CastLog.event("WARN", "释放画面来源失败：${it.message}") }
         runCatching { vehicle?.close() }
         vehicle = null
-        // Bluetooth closes last: the car notices its absence and would otherwise
-        // reset the session before the Wi-Fi side has finished tearing down.
-        runCatching { bluetooth?.close() }
-        bluetooth = null
         hid.reset()
         Dispatch.reset()
     }

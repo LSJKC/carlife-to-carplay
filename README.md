@@ -19,7 +19,7 @@
 
 | 版本 | 说明 |
 |---|---|
-| **[最新版](https://github.com/LSJKC/carlife-to-carplay/releases/latest)** | 推荐。当前 1.3.27 |
+| **[最新版](https://github.com/LSJKC/carlife-to-carplay/releases/latest)** | 推荐。当前 1.3.28 |
 | [全部版本](https://github.com/LSJKC/carlife-to-carplay/releases) | 1.3.0 起逐版 APK |
 | [CHANGELOG](CHANGELOG.md) | 每个版本改了什么、为什么改 |
 
@@ -217,7 +217,7 @@ AVC 编码器引用数与 fd 数量，并自动判读：
 
 ## 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.3.27**。
+见 [CHANGELOG.md](CHANGELOG.md)。当前版本 **1.3.28**。
 
 ---
 
