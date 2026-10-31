@@ -7,6 +7,14 @@
     <string name="action_start">开始投屏</string>
     <string name="action_stop">停止投屏</string>
 
+    <string name="action_settings">设置</string>
+    <string name="action_protocol">连接详情</string>
+    <string name="device_pick_empty_hint">没有找到已配对的车机。请先在系统的蓝牙设置里，把手机和车机配对一次；配对完成后回到这里点刷新。</string>
+    <string name="device_pick_howto">选中的车机是投屏的目标。手机上装了多个车机时，选你正在开的这一台。</string>
+    <string name="settings_section_display">画面</string>
+    <string name="settings_section_audio">声音</string>
+    <string name="settings_section_input">触摸与按键</string>
+    <string name="settings_section_behavior">连接行为</string>
     <string name="device_title">车机</string>
     <string name="device_hint">尚未配对车机，请先在系统蓝牙设置中完成配对</string>
     <string name="device_none">尚未配对车机</string>

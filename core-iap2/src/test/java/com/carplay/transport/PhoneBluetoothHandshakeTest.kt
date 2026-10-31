@@ -389,6 +389,57 @@ class PhoneBluetoothHandshakeTest {
         assertEquals(9 + 16 + 1, syn.size)
     }
 
+    @Test fun commandTunnelAcksDoNotConsumeThePeerReceiveWindow() {
+        /*
+         * Pure ACKs advance the phone's sequence on this transport, but the peer
+         * never acknowledges them back. If they also counted as outstanding,
+         * the window (this car declares 5) would fill up one tick at a time and
+         * every real message would sit in the queue forever — which is exactly
+         * what happened: `0x1D00` was logged as sent at +5943ms with no
+         * PACKET QUEUED, and the car repeated `seq=175 ack=99` once a second
+         * until the pointer expired.
+         */
+        val engine = Iap2LinkEngine(PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig())
+        engine.start(false, 0)
+        engine.feed(marker, 1)
+        engine.takeOutput()
+        val peer = Iap2LinkEngine.SynchronizationPayload(
+            maxOutgoing = 5,
+            maxLength = 65535,
+            retransmissionTimeoutMillis = 2000,
+            acknowledgementTimeoutMillis = 300,
+            maxRetransmissions = 3,
+            maxAcknowledgements = 3,
+            sessions = listOf(
+                Iap2LinkEngine.SessionDescriptor(1, 0, 2),
+                Iap2LinkEngine.SessionDescriptor(2, 1, 2),
+            ),
+        ).encode()
+        engine.feed(packet(0x80, 11, 0, 0, peer), 2)
+        engine.takeOutput()
+        engine.feed(packet(0xc0, 12, 99, 0, peer), 3)
+        engine.takeOutput()
+
+        // The car keeps repeating the same SYN|ACK; each one makes us send a
+        // pure acknowledgement. Well past the window of 5, the link must still
+        // be able to carry a real message.
+        repeat(12) { index ->
+            engine.feed(packet(0xc0, 12, 99, 0, peer), 10L + index)
+            engine.takeOutput()
+        }
+        assertTrue("link must still be writable after 12 pure ACKs", engine.writable())
+        engine.sendControl(hex("40 40 00 06 1d 00"), 40)
+        // The message must be on the wire, not parked. A queued packet leaves
+        // the engine unwritable and emits nothing; a sent one produces a frame
+        // whose payload carries the CSM header for 0x1D00.
+        val out = engine.takeOutput()
+        val hex = out.joinToString("") { "%02x".format(it) }
+        assertTrue(
+            "0x1D00 must reach the wire, got ${out.size}B: $hex",
+            hex.contains("40400006") && hex.contains("1d00"),
+        )
+    }
+
     @Test fun commandTunnelIgnoresRepeatedDetectionMarkerAfterNormalHandshake() {
         val engine = Iap2LinkEngine(PhoneBluetoothProfile.COMMAND_TUNNEL.linkConfig())
         engine.start(false, 0)

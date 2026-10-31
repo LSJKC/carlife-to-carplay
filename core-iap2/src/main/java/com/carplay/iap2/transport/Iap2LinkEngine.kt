@@ -804,12 +804,36 @@ class Iap2LinkEngine(
          * CSM: no 0x1D01 in reply to 0x1D00, in every session, on every video
          * source. Repeating 99 forever is the one thing that differs there.
          */
-        if (advanceSequenceOnAcknowledgement) sentSequence = nextSequence(sentSequence)
+        if (advanceSequenceOnAcknowledgement) {
+            sentSequence = nextSequence(sentSequence)
+            /*
+             * …and it must not count against the peer's receive window.
+             *
+             * A pure acknowledgement carries no payload, so the peer never
+             * acknowledges it back. Advancing the sequence without crediting it
+             * leaves `outstanding = sentSequence - lastSentAcknowledged` growing
+             * by one per second with nobody able to shrink it, until the window
+             * (this car declares 5) is full and every real message is parked in
+             * the queue forever:
+             *
+             *     +5888ms  link NORMAL, peerWindow=5
+             *     +5943ms  0x1D00 sent — no PACKET QUEUED follows
+             *     +6913ms  car still says ack=99; we are at 101
+             *     …        car repeats seq=175 ack=99 once a second until teardown
+             *
+             * Crediting the sequence here keeps the window measuring what it is
+             * supposed to measure: unacknowledged *data*.
+             */
+            lastSentAcknowledged = sentSequence
+        }
         writePacket(null, sentSequence, CONTROL_ACKNOWLEDGEMENT, 0)
     }
 
     private fun sendExtendedAcknowledgement(missing: List<Int>) {
-        if (advanceSequenceOnAcknowledgement) sentSequence = nextSequence(sentSequence)
+        if (advanceSequenceOnAcknowledgement) {
+            sentSequence = nextSequence(sentSequence)
+            lastSentAcknowledged = sentSequence
+        }
         writePacket(missing.map { it.toByte() }.toByteArray(), sentSequence, CONTROL_EXTENDED_ACKNOWLEDGEMENT, 0)
     }
 

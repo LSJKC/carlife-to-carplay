@@ -159,8 +159,17 @@ class MainActivity : AppCompatActivity() {
         })
         bar.addView(titles, LinearLayout.LayoutParams(0, -2, 1f))
 
-        bar.addView(iconButton(R.drawable.ic_info, getString(R.string.protocol_title)) { showProtocol() })
-        bar.addView(iconButton(R.drawable.ic_settings, getString(R.string.settings_title)) { showSettings() })
+        /*
+         * Text entries, not two unlabelled icons in the corner.
+         *
+         * The settings sheet holds every option this app has, and a bare gear in
+         * the top-right is the least discoverable place to put it — the first
+         * feedback on the UI was that the corner was unfriendly and that the
+         * functions were not explained. A labelled button says what it opens.
+         */
+        bar.addView(textButton(getString(R.string.action_protocol)) { showProtocol() })
+        bar.addView(textButton(getString(R.string.action_settings)) { showSettings() }
+            .apply { (layoutParams as? LinearLayout.LayoutParams)?.marginStart = dp(8f) })
         return bar
     }
 
@@ -769,29 +778,51 @@ class MainActivity : AppCompatActivity() {
     private fun showPeerSheet() {
         val (sheet, content) = sheetContent()
         content.addView(sheetTitle(getString(R.string.device_pick_title)))
+
+        /*
+         * Say what this list is for before showing it.
+         *
+         * A bare list of Bluetooth addresses left people guessing which entry
+         * was theirs and what selecting one would do. The explanation is one
+         * short line, so it costs almost nothing and removes the guess.
+         */
+        content.addView(TextView(this).apply {
+            text = getString(R.string.device_pick_howto)
+            style(12f, R.color.text_secondary)
+            setLineSpacing(dp(3f).toFloat(), 1f)
+            setPadding(0, dp(2f), 0, dp(10f))
+        })
+
         val listBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6f), 0, 0)
         }
         content.addView(listBox)
 
         fun renderList() {
             listBox.removeAllViews()
             if (peers.isEmpty()) {
+                // An empty list is not a dead end: it names the exact step that
+                // is missing instead of repeating "not paired" once.
                 listBox.addView(TextView(this).apply {
-                    text = getString(R.string.device_hint)
-                    style(12f, R.color.text_tertiary)
-                    setLineSpacing(dp(3f).toFloat(), 1f)
-                    setPadding(0, dp(8f), 0, dp(8f))
+                    text = getString(R.string.device_pick_empty_hint)
+                    style(12.5f, R.color.text_secondary)
+                    setLineSpacing(dp(4f).toFloat(), 1f)
+                    setPadding(dp(2f), dp(10f), dp(2f), dp(10f))
                 })
                 return
             }
             peers.forEachIndexed { index, peer ->
+                val selected = index == selectedPeerIndex
+                // Whole row: bigger tap target than a line of text, and the
+                // selected one is filled rather than marked with a tick nobody
+                // notices.
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(4f), dp(12f), dp(4f), dp(12f))
-                    background = selectableBackground()
+                    setPadding(dp(12f), dp(14f), dp(12f), dp(14f))
+                    background = if (selected) pill(R.color.accent_soft) else selectableBackground()
+                    isClickable = true
+                    isFocusable = true
                     setOnClickListener {
                         selectedPeerIndex = index
                         settings.peerAddress = peer.first
@@ -802,30 +833,30 @@ class MainActivity : AppCompatActivity() {
                 }
                 row.addView(ImageView(this).apply {
                     setImageResource(R.drawable.ic_car)
-                    imageTintList = tint(R.color.accent)
-                }, LinearLayout.LayoutParams(dp(20f), dp(20f)).apply { marginEnd = dp(12f) })
+                    imageTintList = tint(if (selected) R.color.accent else R.color.text_secondary)
+                }, LinearLayout.LayoutParams(dp(22f), dp(22f)).apply { marginEnd = dp(12f) })
 
                 val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                 texts.addView(TextView(this).apply {
-                    text = peer.second
-                    style(14f, R.color.text_primary)
+                    text = peer.second.ifBlank { getString(R.string.device_unnamed) }
+                    style(15f, R.color.text_primary, bold = selected)
                     maxLines = 1
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 })
                 texts.addView(TextView(this).apply {
                     text = peer.first
-                    style(11f, R.color.text_tertiary, mono = true)
-                    setPadding(0, dp(2f), 0, 0)
+                    style(11.5f, R.color.text_tertiary, mono = true)
+                    setPadding(0, dp(3f), 0, 0)
                 })
                 row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
 
-                if (index == selectedPeerIndex) {
-                    row.addView(ImageView(this).apply {
-                        setImageResource(R.drawable.ic_check)
-                        imageTintList = tint(R.color.accent)
-                    }, LinearLayout.LayoutParams(dp(18f), dp(18f)))
+                if (selected) {
+                    row.addView(TextView(this).apply {
+                        text = "已选"
+                        style(11f, R.color.accent, bold = true)
+                    }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8f) })
                 }
-                listBox.addView(row, LinearLayout.LayoutParams(-1, -2))
+                listBox.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(2f) })
             }
         }
         renderList()
@@ -841,17 +872,25 @@ class MainActivity : AppCompatActivity() {
                 renderList()
             }
         }
-        content.addView(refresh, LinearLayout.LayoutParams(-1, dp(44f)).apply { topMargin = dp(14f) })
+        content.addView(refresh, LinearLayout.LayoutParams(-1, dp(46f)).apply { topMargin = dp(16f) })
         sheet.show()
     }
 
     private fun showSettings() {
         val (sheet, content) = sheetContent()
         content.addView(sheetTitle(getString(R.string.settings_title)))
+        content.addView(TextView(this).apply {
+            text = "改动多数在下次连接时生效；标了「立即生效」的会马上起作用。"
+            style(11.5f, R.color.text_tertiary)
+            setLineSpacing(dp(3f).toFloat(), 1f)
+            setPadding(0, 0, 0, dp(10f))
+        })
 
+        content.addView(sectionLabel(getString(R.string.settings_section_display)))
         content.addView(buildSourceBlock())
         content.addView(divider(top = 2, bottom = 2))
 
+        content.addView(sectionLabel(getString(R.string.settings_section_audio)))
         content.addView(toggleRow(
             getString(R.string.settings_audio),
             getString(R.string.settings_audio_detail),
@@ -880,6 +919,7 @@ class MainActivity : AppCompatActivity() {
             else getString(R.string.settings_media_access_detail),
         ) { openMediaListenerSettings() })
 
+        content.addView(sectionLabel(getString(R.string.settings_section_behavior)))
         content.addView(toggleRow(
             getString(R.string.settings_auto_connect),
             getString(R.string.settings_auto_connect_detail),
@@ -1667,6 +1707,30 @@ class MainActivity : AppCompatActivity() {
             stateListAnimator = null
             setPadding(dp(12f), 0, dp(12f), 0)
         }
+
+    /** A small heading that groups related settings. */
+    private fun sectionLabel(text: String): View = TextView(this).apply {
+        this.text = text
+        style(11.5f, R.color.accent, bold = true)
+        letterSpacing = 0.06f
+        setPadding(0, dp(14f), 0, dp(6f))
+    }
+
+    /** A compact labelled button for the top bar: readable without an icon. */
+    private fun textButton(label: String, onClick: () -> Unit): View {
+        val view = TextView(this).apply {
+            text = label
+            style(13f, R.color.text_primary, bold = true)
+            gravity = Gravity.CENTER
+            setPadding(dp(12f), 0, dp(12f), 0)
+            background = pill(R.color.surface_high)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+        view.layoutParams = LinearLayout.LayoutParams(-2, dp(36f))
+        return view
+    }
 
     private fun iconButton(
         icon: Int,
