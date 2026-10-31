@@ -243,6 +243,8 @@ class AirPlaySender(
     private var selectedAudio: SenderAudioFormat? = null
     /** Guards [scheduleAudioReclaim] so one borrow starts one reclaim. */
     private val audioReclaimRunning = java.util.concurrent.atomic.AtomicBoolean()
+    /** Guards [scheduleCompanionAudio] so one session schedules one companion. */
+    private val companionAudioRunning = java.util.concurrent.atomic.AtomicBoolean()
 
     /** The /info reply, kept so the companion SETUP can echo what this car declared. */
     @Volatile private var sessionInfo: Map<*, *> = emptyMap<Any, Any>()
@@ -1534,22 +1536,66 @@ class AirPlaySender(
             events.diagnostic("车机音频回包未提供 controlPort：跳过 RTP↔NTP 同步包")
         }
         /*
-         * Do NOT open the companion stream on this transport.
+         * The companion stream is opened later, not now.
          *
-         * 1.2.76 started one unconditionally and every session paid for it:
+         * 1.2.76 opened it immediately after the main stream and every session
+         * paid for it:
          *
          *     6616 第二条音频流 SETUP 失败：车机拒绝 SETUP /：400
          *
-         * The car answers 400 to a second audio SETUP in the same session. The
-         * iPhone's second stream exists (AudioAlt, Opus) but its trace shows it
-         * brought up LATER and torn down after ~1.2 s — it is a separate
-         * session-scoped stream, not a second SETUP appended to ours.
+         * The head unit answers 400 to a second audio SETUP that arrives in the
+         * same breath as the first. The iPhone's own trace shows the correct
+         * shape — from sysdiagnose 2026-10-31:
          *
-         * Sending it costs a rejected SETUP mid-session, and a 400 during the
-         * screen stream's watchdog window is exactly the kind of traffic the
-         * receiver resets a connection over. Leave it out until the reference
-         * sender's timing can be reproduced properly.
+         *     07:58:22.808  AudioMain   Setup succeeded
+         *     07:58:42.163  AudioAlt    Setup succeeded     (+19.3 s)
+         *     07:58:48.397  AudioAlt    Setup succeeded     (rebuilt)
+         *     07:59:02.072  AudioAlt    Setup succeeded     (rebuilt)
+         *     07:59:27.885  OutOfBandAVVCAudio (Siri uplink)
+         *     07:59:27.983  AudioAux    Setup succeeded
+         *
+         * So these are separate, on-demand streams brought up well after the
+         * main one and torn down when the app that wanted them stops. Opening
+         * them at RECORD time is what earned the 400.
+         *
+         * Scheduled here with the same gap the iPhone uses. If the car still
+         * refuses, the rejection is logged and nothing else is affected: the
+         * main stream and the screen are already running by then.
          */
+        scheduleCompanionAudio(wire, format, shared, address)
+    }
+
+    /**
+     * Brings the companion audio stream up after the main one has settled.
+     *
+     * Deliberately delayed: a second audio SETUP arriving with the first gets
+     * a 400 (see the call site), and a 400 inside the screen stream's watchdog
+     * window is the kind of traffic this receiver resets over. Nineteen seconds
+     * is the gap the iPhone's own trace uses on this car.
+     */
+    private fun scheduleCompanionAudio(
+        wire: RtspWire,
+        format: SenderAudioFormat,
+        shared: ByteArray,
+        address: InetAddress,
+    ) {
+        if (companionAudioRunning.compareAndSet(false, true)) {
+            Thread({
+                try {
+                    Thread.sleep(COMPANION_AUDIO_DELAY_MS)
+                    if (closed.get()) return@Thread
+                    setupCompanionAudio(wire, format, shared, address)
+                } catch (_: InterruptedException) {
+                    // Session teardown interrupts this worker.
+                } catch (failure: Throwable) {
+                    if (!closed.get()) {
+                        events.diagnostic("辅助音频流建立异常：${failure.message ?: failure.javaClass.simpleName}")
+                    }
+                } finally {
+                    companionAudioRunning.set(false)
+                }
+            }, "carplay-companion-audio").apply { isDaemon = true; start() }
+        }
     }
 
     /**
@@ -2745,6 +2791,15 @@ class AirPlaySender(
          * pestering a car that simply wants the audio elsewhere.
          */
         private val AUDIO_RECLAIM_DELAYS_MS = longArrayOf(2_000L, 6_000L)
+
+        /**
+         * Gap between the main audio SETUP and the companion's.
+         *
+         * The iPhone's trace on this car brings AudioAlt up 19.3 s after
+         * AudioMain. A second audio SETUP arriving with the first gets 400, so
+         * the gap is what makes the companion possible at all.
+         */
+        private const val COMPANION_AUDIO_DELAY_MS = 19_000L
 
         /**
          * Scheduling lead for the screen stream — The verified value.
