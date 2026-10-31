@@ -391,26 +391,26 @@ class Iap2LinkEngine(
                         continue
                     }
                     /*
-                     * Before the session is established: consume the marker and
-                     * stay quiet.
+                     * Before the session is established, a repeated marker is
+                     * the car asking for the second round — do exactly that.
                      *
-                     * Neither of the previous two behaviours is right here.
-                     * Calling die() ends a link the car is still willing to
-                     * use; echoing it tells the car the link is healthy, so it
-                     * never starts the second round it actually wants — the
-                     * B233 capture shows exactly that, twenty seconds of
-                     * silence followed by "第二轮 iAP2 同步未完成".
+                     * This is the only path that has ever produced 0x4301 on
+                     * this car. The working capture reads:
                      *
-                     * Discarding it does neither: the link stays usable and the
-                     * car still owns the decision to restart it. Once 0x4301
-                     * arrives the echo is turned on and this branch is no
-                     * longer reached.
+                     *     2261  send 0x4300
+                     *     4891  car repeats the marker -> die() -> rebuild
+                     *     4893  second round starts on the same RFCOMM
+                     *     5172  re-identify inside it
+                     *     6842  0x4301 arrives **in the second round**
+                     *
+                     * So the marker is not noise to be swallowed (1.3.37) and
+                     * the rebuild is not something to put off on a timer
+                     * (1.3.38): both of those leave the car waiting. It has to
+                     * happen the moment the marker arrives.
+                     *
+                     * After 0x4301 the echo is switched on, this branch stops
+                     * being reached, and the marker means "still alive" again.
                      */
-                    if (config.ignoreRepeatedDetectionMarker) {
-                        receive.discard(IAP2_MARKER.size)
-                        discarded = true
-                        continue
-                    }
                     die("车机在控制阶段重新发送 iAP2 检测包，旧链路已结束", receive.take(receive.size))
                     return false
                 }

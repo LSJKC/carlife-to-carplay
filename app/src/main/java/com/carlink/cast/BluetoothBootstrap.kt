@@ -452,7 +452,15 @@ internal class BluetoothBootstrap(
      * inbound iAP2 frame (`C0237ic`: `this.b = 20000L`). Same number here so a
      * field capture compares like with like.
      */
-    private val IDLE_REBUILD_AFTER_MS = 6_000L
+    /*
+     * Back to the value the working captures ran with.
+     *
+     * 1.3.38 shortened this to 6 s on the theory that waiting was the problem.
+     * It was not: the car's own rebuild marker arrives about 4.9 s after 0x4300
+     * and the second round follows immediately. A timer that fires first only
+     * races the car.
+     */
+    private val IDLE_REBUILD_AFTER_MS = 20_000L
 
     /**
      * How long one second-round handshake may take before it is abandoned.

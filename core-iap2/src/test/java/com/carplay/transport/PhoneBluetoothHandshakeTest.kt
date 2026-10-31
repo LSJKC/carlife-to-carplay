@@ -464,25 +464,41 @@ class PhoneBluetoothHandshakeTest {
         assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
 
         /*
-         * A repeated marker before the session is established must neither end
-         * the link nor be echoed.
+         * Before 0x4301 the marker is the car asking for the second round.
          *
-         * Ending it is what 1.3.9 did and it broke other firmware. Echoing it
-         * before 0x4301 is what 1.3.31 did, and the B233 capture shows the cost:
-         * the car takes the echo as "still alive", never starts the second
-         * round it wants, and the handshake dies twenty seconds later with
-         * "第二轮 iAP2 同步未完成".
+         * The working capture proves it: the car repeats the marker, the link
+         * is torn down, a second round starts on the same RFCOMM, and 0x4301
+         * only arrives inside that round. Swallowing the marker (1.3.37) or
+         * deferring the rebuild to a timer (1.3.38) both leave the car waiting
+         * until its watchdog fires.
          */
+        engine.feed(marker, 4)
+        val dead = engine.pollEvent() as Iap2LinkEngine.Event.Dead
+        assertTrue(dead.reason!!.contains("检测包"))
+        assertArrayEquals(marker, dead.restartInput)
+    }
+
+    @Test fun establishedSessionEchoesAMarkerInsteadOfDroppingTheLink() {
+        /*
+         * Once the wireless configuration has arrived the same marker is a
+         * heartbeat. Tearing the link down for it drops every queued message —
+         * 0x5001 media above all — which is what kept the media card on
+         * "正在加载".
+         */
+        val engine = Iap2LinkEngine(PhoneBluetoothProfile.ACCESSORY_FIRST.linkConfig())
+        engine.start(false, 0)
+        engine.feed(marker, 1)
+        engine.takeOutput()
+        engine.feed(packet(0x80, 11, 0, 0, peer(1)), 2)
+        engine.takeOutput()
+        engine.feed(packet(0x40, 11, 99, 0), 3)
+        while (engine.pollEvent() != null) Unit
+        assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
+
+        engine.allowRepeatedMarkerEcho()
         engine.feed(marker, 4)
         assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
         assertNull(engine.pollEvent())
-        assertArrayEquals(byteArrayOf(), engine.takeOutput())
-
-        // Once the session is established the same marker is a heartbeat and is
-        // answered, so a session that already works keeps working.
-        engine.allowRepeatedMarkerEcho()
-        engine.feed(marker, 5)
-        assertEquals(Iap2LinkEngine.State.NORMAL, engine.state())
         assertArrayEquals(marker, engine.takeOutput())
     }
 
