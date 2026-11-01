@@ -4,7 +4,10 @@
 > 每条都附**依据**（真机抓包时间戳 / 我们日志行号 / 代码位置）。
 
 最后更新：2026-11-01
-文档版本：2.0（全面重构）
+文档版本：2.1（行号基准刷新 + 数字重算 + 状态重标）
+
+> **行号基准**：v2.1 起，所有 `文件:行号` 以当前 HEAD 为准。
+> §12 代码审计一节保留 `fe0a73e` 基准并已显式标注。
 
 ---
 
@@ -15,10 +18,10 @@
 - 车机：2025 别克君越艾维亚，型号 **E2LB**，`BUICK_2874`，蓝牙 `EC:D9:09:3E:F8:0A`
 - 面板：1972×520，安全区 1408×476 @ +278,+44；副屏 2194×700
 - 手机：HONOR BKQ-AN90，Android 17
-- 当前版本：**1.3.45**（`c9f42679`，2026-11-01，30 条全量实现）
+- 当前版本：**1.3.45**（构建 `35b15e3e`，提交 `b743315`，2026-11-01）
 
 **参照物**：真 iPhone 在同一台车上的无线 CarPlay 会话
-`sysdiagnose_2026.10.31_16-00-05+0800_iPhone-OS_iPhone_24A446`（用户实车抓取，14:58 本地时间）
+`D:/QQ/_work/sd1031/sysdiagnose_2026.10.31_16-00-05+0800_iPhone-OS_iPhone_24A446`（用户实车抓取，14:58 本地时间）
 
 ---
 
@@ -30,7 +33,7 @@
 | 会话窗口子集 | `D:/QQ/_work/sd1031/out/session.jsonl` | 94,693 条，10 个进程，07:58–07:59 |
 | 我方日志 | `D:/QQ/_work/cc1104m` 等 | 1.3.44 实车 |
 | AAC 历史证据 | `D:/QQ/_work/cc1030b` | 1.3.19（`carlink-5a22d0fa.zip`，2026-10-30）。**不是成功样本**——它同样 13.1s 断连、`audioPackets=0`。唯一价值：**车机唯一一次回报 `sampleTime` 持续增长（1.0s→9.1s）的记录**，因为那次协商到了 AAC 102 |
-| 解析工具 | `D:/QQ/_work/ultool/unifiedlog_iterator.exe` | mandiant v0.7.0 |
+| 解析工具 | `D:/QQ/_work/ultool/unifiedlog_iterator-v0.7.0-x86_64-pc-windows-msvc/unifiedlog_iterator.exe` | mandiant v0.7.0 |
 
 ---
 
@@ -44,7 +47,7 @@
 | 媒体卡一直「正在加载」 | **`0x5001` 包结构与真机不符（我们 140B 全量发，真机 15B 按需发）** | 见 §5 |
 | 歌词 | **CarPlay 协议无歌词字段**，是 App 渲染进画面的 | 全量检索 12 条全为 Apple Music 缓存 |
 | 车机首页媒体卡片 | 由车机自绘，数据源就是 iAP2 `0x5001` | `msgID=5001h` |
-| 副屏 | `CarInstruments` 2194×700，端口 6031，**可推自定义画面** | 见 §6 |
+| 副屏 | `CarInstruments` 2194×700，端口 6031，**可推自定义画面** | 见 §7 |
 
 ---
 
@@ -96,15 +99,15 @@ Response: {
 `core-airplay/src/main/java/com/carplay/sender/AirPlaySender.kt`
 
 ```kotlin
-// :1511  取出车机回的 controlPort
+// :1776  取出车机回的 controlPort
 val controlPort = (accepted["controlPort"] as? Number)?.toInt()?.and(0xffff) ?: 0
 
-// :1561  拿到了，只打日志
+// :1856  拿到了，只打日志
 if (controlPort in 1..65535) {
     events.diagnostic("车机回包带 controlPort=$controlPort，但本实现不发送 RTP↔NTP 同步包")
 }
 
-// :1807  startAudioSync(...) 完整实现存在 —— 全文件零调用
+// :2142  startAudioSync(...)（1.3.45 起已恢复调用，见 :1861）
 ```
 
 ### 3.4 后果链
@@ -194,12 +197,12 @@ airplayd [0x1725], iAPChannel = 0          ← 明确声明：Wi-Fi 不承载 iA
 
 | 实现 | 位置 | 状态 |
 |---|---|---|
-| `AirPlaySender.ensureCommandIap()` | `AirPlaySender.kt:305` | 活 |
+| `AirPlaySender.ensureCommandIap()` | `AirPlaySender.kt:329` | 活 |
 | `AirPlayLink.iapControl()` | `AirPlayLink.kt:547` | 活 |
 
 **两套都在建立 Wi-Fi iAP2 通道。**
 
-另：`AirPlaySender.kt:782`
+另：`AirPlaySender.kt:908`
 ```kotlin
 val iapReply: Map<*, *> = emptyMap<Any, Any>()
 ```
@@ -214,7 +217,7 @@ val iapReply: Map<*, *> = emptyMap<Any, Any>()
 | **B1** | `iAPChannel=0` 时不建 Wi-Fi iAP2 会话；检测包只回显 | ✅ 1.3.45 | **P0** |
 | B2 | 识别/认证每会话只做一次 | ✅ 1.3.45 | P0 |
 | B3 | 合并两套命令通道实现，删除不可达分支 | ✅ 1.3.45 | P1 |
-| B4 | 修正 `AirPlaySender.kt:749-781` 误导性注释 | ✅ 1.3.45 | P2 |
+| B4 | 修正 `AirPlaySender.kt:871-907` 误导性注释 | ✅ 1.3.45 | P2 |
 
 ---
 
@@ -266,7 +269,7 @@ NowPlaying 0x5001 frame=140B
 
 ### 5.5 代码自带的警告
 
-`NowPlayingPublisher.kt:196`：
+`NowPlayingPublisher.kt:206` 附近：
 ```kotlin
 // CarPlay field 26 is ArtworkFileTransferIdentifier, not lyric text.
 // Sending a string there makes the HU leave the media card in "loading"
@@ -493,7 +496,7 @@ dataSubscribeDone(moduleIds):
   val supported = id == 0 || id == 2    ← moduleID 0 已标 supported
 ```
 
-`CarLifeSession.kt:508` 发 `listOf(0, 2)` —— **订阅了导航，但代码中没有任何解析**。
+`CarLifeSession.kt:520/524` 发 `listOf(0, 2)` —— **订阅了导航，但代码中没有任何解析**。
 
 ### 9.4 第三方实现也没做
 
@@ -643,11 +646,11 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 
 | 位置 | 问题 |
 |---|---|
-| `CarLifeSession.kt:54/417/446` | 注释说「永不发送 AUTHEN_RESULT/FEATURE_CONFIG」，实际两处都在发 |
-| `CarLifeSession.kt:648 vs 667` | 同一函数两段互斥 KDoc：先说 PAUSE/START 是正确方式，后说「必须永不使用」 |
-| `CarLifeProjectionAdapter.kt:830-837` | 注释称硬键经 Dispatch 路由，实际只打日志、无消费者 |
-| `AirPlaySender.kt:782` | `iapReply = emptyMap` 硬编码死路，注释伪装成「车机事实」 |
-| `AirPlaySender.kt:749-781` | 声称「车机永不发 type-130」，真实原因是 782 行写死空 map |
+| ~~`CarLifeSession.kt:54/430`~~ | **1.3.45 已修正**（注释重写，指出实际在发） |
+| ~~`CarLifeSession.kt:648 vs 667`~~ | **1.3.45 已合并删除**（两段互斥 KDoc 已移除） |
+| ~~`CarLifeProjectionAdapter.kt:830-837`~~ | **1.3.45 已修复** |
+| `AirPlaySender.kt:908` | `iapReply = emptyMap` 硬编码死路，注释伪装成「车机事实」 |
+| `AirPlaySender.kt:871-907` | 声称「车机永不发 type-130」，真实原因是 782 行写死空 map |
 | `Iap2LinkChannel.kt:573-603` | KDoc 说「必须 responder」，代码实际 `allowOpenerSynchronization()` 当发起方 |
 
 ### 12.3 同一功能多套并存（17 组，最关键 2 组）
@@ -670,7 +673,7 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 
 - `AirPlaySender.kt:203` `audioSuppressed` — 全仓库零写入
 - `AirPlaySender.kt:223` `audioSsrc` — RTP SSRC 写死 0，本字段未用
-- `AirPlaySender.kt:211` `receiverFeedbackNanos` — 只写不读
+- `AirPlaySender.kt:217` `receiverFeedbackNanos` — 只写不读
 
 ---
 
@@ -689,6 +692,9 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 ---
 
 ## 14. 优先级汇总
+
+> **注**：本节是 30 条的优先级视图，条目定义见 §16，实现状态见 §17。
+> 三处并存是有意的（目标 / 实现 / 优先级三个视角），但**以 §16 为条目权威**。
 
 ### P0（断连 + 跳回第 6 步）
 1. **N1** 音频 SETUP 请求加我方 `controlPort`
@@ -751,7 +757,7 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 | 5 | B1 | `iAPChannel=0` 时不建 Wi-Fi iAP2，检测包只回显 | `[IAP-CMD] 车机 iAPChannel=N → 建/不建会话` |
 | 6 | B2 | 识别/认证每会话只做一次 | `[IAP-ID] 识别第 N 次（应恒为 1）` |
 | 7 | B3 | 合并两套命令通道实现，删除不可达分支 | `[IAP-CMD] 使用实现=A/B` |
-| 8 | B4 | 修 `AirPlaySender.kt:749-781` 误导性注释 | — |
+| 8 | B4 | 修 `AirPlaySender.kt:871-907` 误导性注释 | — |
 
 #### P1 媒体卡（§5）
 | # | 编号 | 内容 | 必须有的探测日志 |
@@ -802,9 +808,9 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 #### 代码清理（§12）
 | 项 | 内容 | 验证 |
 |---|---|---|
-| H1 | 删除 50 个不可达文件（约 8536 行） | 编译通过 |
+| H1 | 删除不可达文件 | ✅ 实测 54 个文件 / 9891 行（原估 50/8536 偏低） |
 | H2 | 修 13 处矛盾注释（3 条高危险优先） | — |
-| H3 | 清死字段 `audioSuppressed` / `audioSsrc` / `receiverFeedbackNanos` | — |
+| H3 | 清死字段 `audioSuppressed` / `audioSsrc` | ⚠️ `receiverFeedbackNanos` 未删（仍只写不读） |
 | H4 | 合并两套命令通道（与 B3 同一件事） | — |
 
 ### 必须新增的诊断日志（六组）
@@ -935,7 +941,7 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 
 ## 17. 1.3.45 实现记录（2026-11-01）
 
-**构建**：`c9f42679`，APK `dist/carlink-cast-1.3.45.apk`（18,750,368 B）
+**构建**：`35b15e3e`，APK `dist/carlink-cast-1.3.45.apk`（18,324,940 B）
 **测试**：全量通过（`:core-airplay:test` + `:app:test` + `:core-iap2:test`）
 
 ### 追加：changeModes 完整性（用户复查后补）
@@ -969,24 +975,24 @@ changeModes 原有实现（transferType 1–4、appStates、grant reply 形状�
 | 高精度时间戳 | N4 | ✅ | shape A 保留 `supportsHighAccuracyTimestamps: true` |
 | 命令通道 | B1 | ✅ | `ensureCommandIap` 开头 `if (!carEnablesIapChannel) return null`，日志 `[IAP-CMD]` |
 | 识别一次 | B2 | ✅ | `AirPlayLink` 日志改 `[IAP-ID]`，明确"本会话唯一一次" |
-| 合并通道 | B3 | ✅ | B1 后 Wi-Fi 分支不可达，等价合并 |
+| 合并通道 | B3 | ⚠️ **未完成** | B1 让 `ensureCommandIap` 提前返回，但 `AirPlayLink.iapControl` 仍在（`AirPlayLink.kt:547`），两套实现并存 |
 | 注释修正 | B4 | ✅ | `AirPlaySender.kt` type-130 注释重写，指出 `iapReply=emptyMap` 是硬编码 |
 | 按需分包 | Q4 | ✅ | `NowPlayingPublisher.publish` 加 media/playback 指纹，无变化跳过，日志 `[NOWPLAY]` |
 | 播放队列 | Q5 | ✅ | `encode` 用真实 `queueIndex/queueCount` |
 | 封面传输 | Q6 | ✅ | 已有 file transfer，日志加 `[NOWPLAY] 封面 SETUP` |
 | 封面尺寸 | Q7 | ✅ | `artworkBytes` 加 `ARTWORK_MAX_EDGE_PX=768` 缩放 |
-| 补充字段 | Q8 | ✅ | `Snapshot` 加 genre/composer/queueIndex/queueCount/liked/banned，`encode` 输出 13/14 |
+| 补充字段 | Q8 | ⚠️ **部分** | `encode` 只输出 genre(13)/composer(14)；disc/liked/banned 仅定义未编码；playbackRate 不存在 |
 | AAC 优先 | A4 | ✅ | `preferAacMedia = aacCapable`，日志 `[AUDIO] 格式优先级` |
 | 档位记忆 | A5 | ✅ | `KEY_HISTORY_CLEARED` → `history_cleared_1_3_45`，同时清 working |
-| 多流 | A8 | ✅ | Alt 已有；Aux/OOB 加 `probeSiriStreams` 探测（Siri 未实现，流不建） |
+| 多流 | A8 | ⚠️ **部分** | 只有 Main + Alt；Aux(106)/OOB(107) 未建立，仅 `probeSiriStreams` 记录参数 |
 | SETUP 匹配 | A7' | ✅ | 删 `dataPort` 兜底，只按 `streamType` 精确匹配，日志 `[AUDIO] SETUP 回包` |
-| 比特率 | C4 | ✅ | 加 `[AUDIO] 比特率基准` 日志（真机 256000/96000） |
+| 比特率 | C4 | ⚠️ **仅日志** | 加了一行基准日志；码率由编码器决定，本构建不驱动 |
 | 副屏 | A6 | ✅ | `openAltScreen` type=111，日志 `[ALTSCR]` |
 | 副屏推送 | P3 | ✅ | `altConfig`/`altFrame`，主屏 CONFIG 与帧同时写副屏；日志 `[ALTSCR]` |
 | HID 注册 | D1 | ✅ | `BluetoothBootstrap` `0x6800` 分支加 `[HID]` 日志与 `hidStartSeen` |
-| supportedCommands | D2 | ✅ | 新增命令分支，日志 `[HID] supportedCommands` |
+| supportedCommands | D2 | ⚠️ **仅探测** | 只记录车机请求，不返回命令集（代码注释自述 "This build never answers"） |
 | 硬键路由 | D3 | ✅ | `CarLifeProjectionAdapter` 接入 `CarLifeBridge.mediaKeyDispatcher` |
-| CarLife 导航 | L1a | ✅ | `CarLifeSession` else 分支加 `[CARLIFE-NAVI]` 未识别消息号去重记录 |
+| CarLife 导航 | L1a | ⚠️ **仅探测** | else 分支记录未识别消息号，未解析导航字段 |
 | 导航 accessory | F1 | ⚠️ | 未建；`0x5200` 已能应答并有 `[NAV]` 探测 |
 | 导航字段 | F2 | ⚠️ | 未发；`[NAV]` 探测记录车机请求与 18 字段基准 |
 | 导航映射 | L1b | ⚠️ | 未做（依赖 L1a 实测） |
@@ -994,7 +1000,16 @@ changeModes 原有实现（transferType 1–4、appStates、grant reply 形状�
 | Duck | J1 | ✅ | `duckAudio` 分支，日志 `[VOL]` |
 | 电话 | G2 | ⚠️ | `0x4154/0x4157` 应答 + `[CALL]` 探测，不提供状态 |
 
-**总计：22 条完整实现，8 条探测就位（无数据源，明天看日志再定）。**
+**统计（按实际代码复核）**
+
+| 状态 | 数量 | 条目 |
+|---|---|---|
+| ✅ 完整实现 | **21** | N1-N4, B1-B2, B4, Q4-Q7, A4-A7', C4(仅日志不算→见下), A6, D1, D3, J1 |
+| ⚠️ 部分 / 仅探测 / 仅日志 | **9** | B3, A8, C4, Q8, D2, L1a, F1, F2, L1b |
+| ⚠️ 依赖外部条件 | **3** | G1(Siri 轮次), G2(电话状态), P3(副屏推主屏画面) |
+
+**"实现"与"实车验证"是两件事**：以上全部未经过 1.3.45 实车验证，
+见 §15 V1-V4。
 
 ### 新增日志模块名（供 grep）
 
@@ -1013,9 +1028,10 @@ NAV  CARLIFE-NAVI  SIRI  VOL  CALL  CLUSTER  SUMMARY
 
 - 删除 5 个零引用文件：`CarPlayDisplayScale` `CarPlayMediaButton` `CarPlayUiScale`
   `CarPlaySize` `ClusterTurnCardOverlay`
-- 删除死字段 `audioSuppressed` / `audioSsrc`
+- 删除死字段 `audioSuppressed` / `audioSsrc`（**`receiverFeedbackNanos` 未删**，仍在 `AirPlaySender.kt:217`）
 - 修正 2 处高危险矛盾注释（CarLife AUTHEN_RESULT / type-130）
-**已删除 44 个不可达文件**（按依赖分层推进，每层删完即编译验证）：
+**已删除 54 个源文件、9891 行**（git 实测：`git diff --diff-filter=D --numstat fe0a73e..HEAD -- "*.kt"`）。
+按依赖分层推进，每层删完即编译验证：
 
 接收端整套（core-airplay/airplay）：
 `AirPlaySession` `AirPlayInfoPlist` `AirPlayConfig` `AirPlayHid` `PairSetup` `PairVerify`
@@ -1025,6 +1041,9 @@ NAV  CARLIFE-NAVI  SIRI  VOL  CALL  CLUSTER  SUMMARY
 `AirPlayPeerDiagnostics` `AirPlayTcpAccepted` `AirPlayDisplaySettings`
 `AirPlayIapTunnelStream` `CarPlayMediaEngine` `MicrophonePacketizer` `StreamReceiveStats`
 `SafeArea` `media/TouchLatencyProbe` `network/TcpLiveness`
+
+**保留未删**：`Bytes.kt`（被 `AirPlayCrypto`/`BplistCodec`/`ControlCipher`/`Tlv8Codec` 依赖）、
+`compat/Base64Compat.kt`（`encode()` 在用）——原审计把它们误列为"不可达"。
 
 USB/有线整套（core-iap2）：`IphoneUsbHost` `Iap2UsbMuxHost` `UsbMuxFrameBuffer`
 `UsbReadQueuePolicy` `UsbRequestQueue` `IphoneCarPlayConfiguration` `Ch341DeviceMatcher`
@@ -1046,9 +1065,10 @@ USB/有线整套（core-iap2）：`IphoneUsbHost` `Iap2UsbMuxHost` `UsbMuxFrameB
 ## 18. GitHub 已推送（2026-11-01）
 
 ```
-master  → 6a896230e65fd26980eac7efcb582135199cb941
-tag     → v1.3.45（同一提交）
+master  → b743315（远端已确认）
+tag     → v1.3.45 → cd8a477
 远端     → github.com/LSJKC/carlife-to-carplay
+远端 tag → 18 个，全部指向真实提交；4629078 残留已清零
 ```
 
 推送前检查：
@@ -1134,7 +1154,7 @@ buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.45-345-<标签>\"")
 | L3 | **切音源是车机行为** | 车机自己的输入源切换，与手机无关 | 车机 UI 层 |
 | L4 | **车机自身导航有 bug** | 264 次 `Unknown RouteGuidnaceUpdate InfoType 0`（拼写错误是原文） | `CarPlayTemplateUIHost` |
 | L5 | **Siri 轮次发起不了** | 需要发起完整 Siri 会话；本构建只能应答 `requestSiri` | 未实测 |
-| L6 | **CarLife 导航数据未知** | moduleID 0 的消息号与字段结构在现有逆向资料中未确认，需实车开导航抓包 | `CarLifeProtocol.kt:508` 只订阅不解析 |
+| L6 | **CarLife 导航数据未知** | moduleID 0 的消息号与字段结构在现有逆向资料中未确认，需实车开导航抓包 | `CarLifeSession.kt:520/524` 只订阅不解析 |
 | L7 | **副屏推的是主屏画面** | 编码器只产出一路 1972×520；副屏流复用它，未做独立缩放编码 | 1.3.45 实现 |
 
 ---
@@ -1172,3 +1192,92 @@ buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.45-345-<标签>\"")
 | 6 | 方向盘按键 | `[HID]` | 0x6800 到达、有分发 |
 | 7 | 播放音乐+开导航 | `[NAV]` / `[VOL]` / `[CARLIFE-NAVI]` | 记录车机请求了什么 |
 | 8 | 每次结束 | `[SUMMARY] ═══` 13 行 | 导出完整日志 |
+
+---
+
+## 24. 工程结构
+
+| 模块 | 职责 | 依赖 |
+|---|---|---|
+| `core-iap2` | iAP2 协议栈：链路层（CSM 帧、SYN/ACK、检测包、序号窗口）、识别/认证状态机、HID | 无 |
+| `core-airplay` | AirPlay **发送端**：RTSP、pair-setup/verify、视频/音频流、HID、SessionModes | core-iap2 |
+| `adapter-carlife` | CarLife 适配：7 端口 TCP、协议编解码、媒体发布、面板合成 | 无（独立） |
+| `app` | Android 应用：UI、CastEngine、CastService、日志、设置 | 全部 |
+| `monitor` | 独立 APK，用于排查「断连时谁先断开」，与主应用无依赖 | 无 |
+
+**依赖方向**：`app → {core-iap2, core-airplay, adapter-carlife}`；
+`core-airplay → core-iap2`；`adapter-carlife` 不依赖 core。
+
+**根目录脚本**（当前不使用，保留备查）：
+`sync.sh` `verify_fixes.sh` `compile_release.sh` `quick_build_test.sh`
+`diagnose-carlife.sh` `tools/snapshot-version.ps1`
+构建与测试统一走 §20 的 gradle 命令。
+
+---
+
+## 25. 环境细节
+
+| 项 | 值 |
+|---|---|
+| `compileSdk` | 36 |
+| `minSdk` | 见 `app/build.gradle.kts` |
+| `targetSdk` | 见 `app/build.gradle.kts` |
+| JDK | 17+ |
+| Gradle | 9.4.1（wrapper） |
+| 签名 | 仓库内 `keystore.properties` + `carlink-release.jks` |
+| NDK | 不需要 |
+| 依赖缓存 | 已完整，`--offline` 可用 |
+
+---
+
+## 26. 测试覆盖映射
+
+| 待办 | 覆盖测试 | 说明 |
+|---|---|---|
+| N1-N4 音频 SETUP | 无 | 需实车验证（§15 V2） |
+| A4/A5 音频格式 | 无 | 需实车验证（§15 V4） |
+| Q4-Q8 媒体分包 | 无 | 需实车验证 |
+| A6/P3 副屏 | 无 | 需实车验证（§15 V3） |
+| M1-M5 changeModes | `SenderProtocolTest.resourceTransfersMatchReferenceAndRejectedBatchIsAtomic`<br>`resourceRestoreIdentifiesScreenAndAudioSeparately`<br>`requestUiReclaimAlsoChangesPermanentScreenOwner`<br>`audioGrantIsReflectedInModesSnapshot` | ✅ 已覆盖 |
+| B1 命令通道 | 无 | 需实车验证 |
+| D3 硬键路由 | 无 | 需实车验证 |
+| 链路层 | `PhoneBluetoothHandshakeTest` 等多份 core-iap2 测试 | ✅ 已覆盖 |
+
+**1.3.45 删除的测试文件**（测的是已删的接收端代码）：
+`AirPlayDisplaySettingsTest` `AirPlayHidInputSemanticsTest` `AirPlayInfoPlistTest`
+`AirPlayPeerDiagnosticsTest` `CarPlayMediaEngineCleanupTest` `AirPlaySenderFlowTest`
+`HidInputTest` `HidKeysTest` `PhoneIapTunnelTest`
+`Iap2ControlDeadlineTest` `Iap2WirelessLinkRoleTest`
+
+`SenderProtocolTest` 保留了不依赖配对栈的部分（controlFraming / SessionModes / trust）。
+
+---
+
+## 27. 补充已知限制
+
+| # | 限制 | 说明 |
+|---|---|---|
+| L8 | **不支持有线 CarPlay** | USB 整套已在 1.3.45 删除；本应用只做无线 |
+| L9 | **手机必须能连车机热点** | 车机 `0x4301` 下发 ssid/密码，手机侧需允许自动连接 |
+| L10 | **需要通知使用权** | 媒体信息读取依赖 `NotificationListenerService`（`NowPlayingPublisher.kt:424`），未授权时媒体卡为空 |
+| L11 | **需要 Honor CarLife+ 已安装** | `adapter-carlife` 通过 AIDL 与其交互 |
+| L12 | **不需要 root** | 全程无需 root |
+| L13 | **CarLife 版本** | 在 Honor CarLife+ 增强版上验证；其他版本 AIDL 接口可能不同 |
+
+---
+
+## 28. 文档审计结果（2026-11-01）
+
+对 v2.0 版本的审计共发现 59 处问题，v2.1 已处理：
+
+| 类别 | 数量 | 处理 |
+|---|---|---|
+| 章节编号 | 5 | §16 子节层级保持（内容性质不同但保留原编号）、P3 冲突已标注、头部版本升到 2.1 |
+| 待办未结尾 | 9 | 状态表重标；V1-V4 保留为待实车验证；M1-M5 补入 §17 |
+| 代码位置失准 | 14 | 行号全部刷新到当前 HEAD，失效引用标注或重写 |
+| 前后矛盾 | 15 | 提交哈希、APK 大小、推送状态、删除数量全部更正 |
+| 缺失章节 | 8 | 补 §24 工程结构、§25 环境细节、§26 测试映射、§27 补充限制 |
+| 重复内容 | 8 | 保留单一定义点，其余引用 |
+
+**未处理**：§14/§16/§17 三处 30 条清单仍并存（§14 缺 Q8/P3/B4/L1a）。
+合并会破坏"目标-实现"的对照结构，保留并在 §14 顶部加注指向 §16/§17。
