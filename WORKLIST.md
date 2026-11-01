@@ -1058,3 +1058,117 @@ tag     → v1.3.45（同一提交）
 - `WORKLIST.md` 已脱敏（移除参考实现名与反编译包名）
 
 **⚠ 凭据提醒**：PAT 曾以命令行形式出现，建议用完后到 GitHub 撤销并重发。
+
+---
+
+## 19. 术语表
+
+| 缩写 | 全称 / 含义 |
+|---|---|
+| **iAP2** | iPod Accessory Protocol 2，苹果配件协议。CarPlay 的控制通道 |
+| **CSM** | Control Session Message，iAP2 控制会话消息。帧格式 `0x4040 + len + msgId + body` |
+| **0x1D00** | StartIdentification，手机→车机，请求开始识别 |
+| **0x1D01** | IdentificationInformation，车机→手机，返回车机身份 |
+| **0x1D02** | IdentificationAccepted，手机→车机，接受身份 |
+| **0xAA00/01/02/03/05** | 认证链：请求证书→证书→挑战→签名→认证成功 |
+| **0x4300** | CarPlayAvailability，手机→车机，声明支持无线 CarPlay |
+| **0x4301** | CarPlayStartSession，车机→手机，下发 Wi-Fi 配置（ssid/密码/IP） |
+| **0x5000/0x5001** | StartNowPlayingUpdates / NowPlayingUpdate，媒体元数据订阅与推送 |
+| **0x5200** | StartRouteGuidanceUpdates，车机订阅导航更新 |
+| **0x6800/0x6801** | StartHID / HID 报告（手机→车机） |
+| **ACCNav_RGUpdate_*** | 导航更新字段族，共 18 个（RouteGuidanceState / DestinationName / DistanceRemaining…） |
+| **AltScreen** | AirPlay 副屏视频流，type=111，端口 6031，分辨率 2194×700 |
+| **MainScreen** | AirPlay 主屏视频流，type=110，端口 6030，分辨率 1972×520 |
+| **CarInstruments** | iOS 内部对仪表盘（副屏）显示的称呼 |
+| **cluster** | 仪表盘 / 副屏，指方向盘前那块小屏 |
+| **iAPChannel** | AirPlay 握手里车机声明是否在 Wi-Fi 上承载 iAP2。本车 = 0（不承载） |
+| **clusterControlChannel** | 同上，针对副屏。本车 = 0 |
+| **controlPort** | 音频 SETUP 请求/回包里交换的 RTP↔NTP 同步端口 |
+| **spf** | Samples Per Frame，每包音频帧数。AAC=1024，PCM=352 |
+| **JBL** | Jitter Buffer Latency，车机音频抖动缓冲。本车 main=1000ms |
+| **DuckCommand** | 车机要求手机压低音乐（导航播报时），本车 DuckVolume=-13.98dB |
+| **AUX/OOB** | AudioAux(106, Siri 音频) / OutOfBandAVVCAudio(107, Siri 上行) |
+| **E2LB** | 车机型号（别克君越艾维亚）。另一台对比机是 E2YB |
+| **BUICK_2874** | 本车的蓝牙名 + 热点名 |
+
+---
+
+## 20. 构建与测试
+
+```bash
+cd F:/carplay/carlink-cast
+
+# 全量测试
+./gradlew test --offline
+
+# 编译检查（不跑测试，快）
+./gradlew :app:compileDebugKotlin --offline
+./gradlew :core-airplay:compileDebugKotlin --offline
+./gradlew :core-iap2:compileDebugKotlin --offline
+
+# 打 Release 包
+./gradlew :app:assembleRelease --offline
+# 产物：app/build/outputs/apk/release/carlink-cast-<版本>.apk
+```
+
+**环境要求**
+- JDK 17+（Gradle 9.4.1）
+- Android SDK（compileSdk 见 `app/build.gradle.kts`）
+- `--offline` 可用：依赖已缓存
+
+**版本号**：改 `app/build.gradle.kts` 三处
+```kotlin
+versionCode = 345
+versionName = "1.3.45"
+buildConfigField("String", "BUILD_ID", "\"carlink-cast-1.3.45-345-<标签>\"")
+```
+
+---
+
+## 21. 已知限制（做不到的事）
+
+| # | 限制 | 原因 | 依据 |
+|---|---|---|---|
+| L1 | **车机首页的媒体卡片画不了** | 那是 iPhone Dashboard 场景系统的 widget（`com.apple.CarRadio` 渲染），我们是整屏推送 | `07:58:23.453 DBWidgetSceneHostViewController` |
+| L2 | **CarPlay 协议没有歌词字段** | 歌词是 App 渲染进画面的 | 13.5GB 全量检索 `lyric` 仅命中 Apple Music 缓存 |
+| L3 | **切音源是车机行为** | 车机自己的输入源切换，与手机无关 | 车机 UI 层 |
+| L4 | **车机自身导航有 bug** | 264 次 `Unknown RouteGuidnaceUpdate InfoType 0`（拼写错误是原文） | `CarPlayTemplateUIHost` |
+| L5 | **Siri 轮次发起不了** | 需要发起完整 Siri 会话；本构建只能应答 `requestSiri` | 未实测 |
+| L6 | **CarLife 导航数据未知** | moduleID 0 的消息号与字段结构在现有逆向资料中未确认，需实车开导航抓包 | `CarLifeProtocol.kt:508` 只订阅不解析 |
+| L7 | **副屏推的是主屏画面** | 编码器只产出一路 1972×520；副屏流复用它，未做独立缩放编码 | 1.3.45 实现 |
+
+---
+
+## 22. 版本历史
+
+| 版本 | 提交 | 主要变更 |
+|---|---|---|
+| 1.3.45 | cd8a477 | 30 条全量实现：controlPort 音频同步、iAPChannel=0 不建命令通道、0x5001 按需分包、AltScreen 副屏、changeModes 5 资源、44 个死文件清理 |
+| 1.3.44 | fe0a73e | 资源所有权按真机顺序：先归车机，音频 SETUP 后再切换 |
+| 1.3.43 | 7daac07 | 命令通道纯 ACK 不再占用序号 |
+| 1.3.42 | 9671ba1 | 收回 1.3.41 的无条件发 SYN |
+| 1.3.41 | 5e8224d | Wi-Fi 命令通道改由手机发 SYN |
+| 1.3.40 | 1d2be30 | 第二轮由手机发 SYN、媒体订阅改绑新链路 |
+| 1.3.39 | 2c79349 | 恢复检测包拆链重建 |
+| 1.3.38 | aa36552 | 第二轮握手失败会重试 |
+| 1.3.37 | 60b6e3f | 修 1.3.31 引入的连不上 |
+| 1.3.36 | 17d8f70 | 补回舒适(50%)安全区与 24Mbps 码率 |
+| 1.3.35 | 5e42c4e | 底栏重做，图标与文字对齐 |
+| 1.3.33 | fae000c | 修复启动闪退 |
+
+---
+
+## 23. 实车测试清单
+
+每次装包后按这个走，测完导日志。
+
+| # | 场景 | 看什么日志 | 通过标准 |
+|---|---|---|---|
+| 1 | 开音频连接 | `[SUMMARY] 音频格式` / `[AUDIO-FB]` | type=102，sampleTime 增长 |
+| 2 | 不开音频连接 | `[SUMMARY] 断连` | 记录时长 |
+| 3 | 观察界面阶段 | `[IAP-CMD]` / `[IAP-ID]` | 不跳回第 6 步 |
+| 4 | 车机首页看媒体卡 | `[NOWPLAY]` | 有封面、歌名、作者 |
+| 5 | 看副屏 | `[ALTSCR]` | 端口 6031 有帧写出 |
+| 6 | 方向盘按键 | `[HID]` | 0x6800 到达、有分发 |
+| 7 | 播放音乐+开导航 | `[NAV]` / `[VOL]` / `[CARLIFE-NAVI]` | 记录车机请求了什么 |
+| 8 | 每次结束 | `[SUMMARY] ═══` 13 行 | 导出完整日志 |
