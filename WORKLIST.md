@@ -938,6 +938,27 @@ feature 编号：`0,1,6,8,11,12,13,14,16,17,20,26,27`（日志只有编号，无
 **构建**：`c9f42679`，APK `dist/carlink-cast-1.3.45.apk`（18,750,368 B）
 **测试**：全量通过（`:core-airplay:test` + `:app:test` + `:core-iap2:test`）
 
+### 追加：changeModes 完整性（用户复查后补）
+
+真机资源表有 **5 个**资源，我们原来只声明了 2 个：
+
+```
+07:58:22.535  screen Car (permanent: Car), mainAudio Car (permanent: Car),
+              speech N/A (N/A), phone N/A, turns N/A
+07:59:27.798  speech iOS (Speaking), turns iOS          ← Siri / 导航启动时
+```
+
+| # | 事项 | 状态 | 说明 |
+|---|---|---|---|
+| M1 | 资源表扩到 5 个：screen(1) mainAudio(2) speech(3) phone(4) turns(5) | ✅ | `SessionModes.resources` |
+| M2 | 未知 resourceID 不再抛异常（原 `require(id in resources)` 会让会话崩溃） | ✅ | 改为 `resources[id] ?: continue` |
+| M3 | 新增 `speechOwner()` / `phoneOwner()` / `turnsOwner()` / `describe()` | ✅ | 只读探测 |
+| M4 | 按真机格式打印 `Modes changed: ...`（5 个资源一行） | ✅ | 初次声明与每次 changeModes 各一次 |
+| M5 | 解析 changeModes 请求的 priority / canTake / canBorrow 并记录 | ✅ | 真机 07:58:42.699 原话 |
+
+changeModes 原有实现（transferType 1–4、appStates、grant reply 形状）复核后确认完整，
+不需要改动。
+
 ### 30 条完成情况
 
 | 组 | 编号 | 状态 | 代码位置 |

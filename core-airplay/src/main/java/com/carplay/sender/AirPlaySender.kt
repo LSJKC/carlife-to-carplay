@@ -1025,6 +1025,7 @@ class AirPlaySender(
             "初始资源所有权已声明：屏幕=${if (modes.ownsScreen()) "手机" else "车机"}，" +
                 "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
         )
+        events.diagnostic("Modes changed: ${modes.describe()}")
         events.display(selected)
         val connection = SecureRandom().nextLong().and(Long.MAX_VALUE)
         /*
@@ -2842,6 +2843,24 @@ class AirPlaySender(
                                 "→ 屏幕=${if (modes.ownsScreen()) "手机" else "车机"} " +
                                 "音频=${if (modes.ownsAudio()) "手机" else "车机"}",
                         )
+                        /*
+                         * Dump the whole table, in the iPhone's own format.
+                         *
+                         * The real sender prints one line per transition
+                         * (2026-10-31 07:58:22.535+):
+                         *
+                         *     Modes changed: screen Car (permanent: Car),
+                         *     mainAudio Car (permanent: Car), speech N/A,
+                         *     phone N/A, turns N/A
+                         *
+                         * Printing the same shape makes the two captures
+                         * directly comparable line for line, including the
+                         * three resources this build does not drive.
+                         */
+                        events.diagnostic(
+                            "Change modes request: ${modes.lastRequestNote}",
+                        )
+                        events.diagnostic("Modes changed: ${modes.describe()}")
                     }
                     result
                 }

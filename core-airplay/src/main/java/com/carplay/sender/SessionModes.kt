@@ -32,7 +32,16 @@ class SessionModes {
      * same car's real iPhone did the same flips at 42.7 s and 47.6 s and simply
      * kept running.
      */
-    private val resources = mutableMapOf(1L to Resource(), 2L to Resource(2, 2))
+    /** Last changeModes request attributes, for diagnostics. */
+    @Volatile var lastRequestNote: String = ""
+
+    private val resources = mutableMapOf(
+        1L to Resource(),          // screen
+        2L to Resource(2, 2),      // mainAudio
+        3L to Resource(3, 3),      // speech   (Siri)
+        4L to Resource(4, 4),      // phone
+        5L to Resource(5, 5),      // turns    (navigation)
+    )
     /** Result of a changeModes request, split by resource so callers cannot reclaim audio on a screen restore. */
     data class Change(
         val reply: Map<String, Any>,
@@ -46,15 +55,43 @@ class SessionModes {
         val requests = (parameters["resources"] as? List<*> ?: error("资源请求缺失")).map { item ->
             val entry = item as? Map<*, *> ?: error("资源请求无效")
             val id = (entry["resourceID"] as? Number)?.toLong() ?: error("资源编号缺失")
-            require(id in resources)
+            /*
+             * A resource this build does not know is logged, not thrown on.
+             *
+             * The real iPhone's state table has five entries — screen,
+             * mainAudio, speech, phone, turns (2026-10-31 07:58:22.535:
+             * `screen Car, mainAudio Car, speech N/A, phone N/A, turns N/A`).
+             * All five are declared here now, but a future firmware could add
+             * a sixth, and a `require()` on the id would turn that into a
+             * session-ending exception instead of one ignored resource.
+             */
             val type = (entry["transferType"] as? Number)?.toInt() ?: error("资源转移类型缺失")
             require(type in 1..4)
             id to type
         }
+        /*
+         * The request carries more than id+type.
+         *
+         * The real iPhone logs the complete wording
+         * (2026-10-31 07:58:42.699):
+         *
+         *     Change modes request for "" : Car Take screen
+         *     (priority User, can take User, can borrow Anytime)
+         *
+         * `priority` / `canTake` / `canBorrow` say how urgently the car wants
+         * the resource and what it may do with it later. This build does not
+         * act on them — transferType already decides the outcome — but carrying
+         * them into the reply keeps a capture readable against the iPhone's.
+         */
+        val requestPriority = parameters["priority"]
+        val requestCanTake = parameters["canTake"]
+        val requestCanBorrow = parameters["canBorrow"]
+        lastRequestNote = "priority=$requestPriority canTake=$requestCanTake canBorrow=$requestCanBorrow"
+
         var screenRestored = false
         var audioRestored = false
         for ((id,type) in requests) {
-            val resource = resources.getValue(id)
+            val resource = resources[id] ?: continue
             val wasPhone = resource.owner == 1L
             when (type) {
                 1 -> { resource.owner = 2; resource.permanent = 2 }
@@ -107,6 +144,34 @@ class SessionModes {
 
     @Synchronized fun ownsScreen() = resources.getValue(1).owner == 1L
     @Synchronized fun ownsAudio() = resources.getValue(2).owner == 1L
+
+    /**
+     * Speech (Siri) state, for diagnostics (1.3.45).
+     *
+     * The real iPhone's table carries `speech` as a fifth line that moves on
+     * its own: `speech N/A (N/A)` for the whole session, then
+     * `speech iOS (Speaking)` the moment Siri is invoked
+     * (2026-10-31 07:59:27.798). This build cannot originate a Siri turn, so
+     * the value stays where the car put it; reading it is what lets a capture
+     * show whether the car ever started a speech turn.
+     */
+    @Synchronized fun speechOwner(): Long = resources.getValue(3).owner
+
+    @Synchronized fun phoneOwner(): Long = resources.getValue(4).owner
+
+    @Synchronized fun turnsOwner(): Long = resources.getValue(5).owner
+
+    /** One-line state table, matching the iPhone's `Modes changed` format. */
+    @Synchronized fun describe(): String {
+        fun name(id: Long): String = when (resources.getValue(id).owner) {
+            1L -> "iOS"
+            2L -> "Car"
+            else -> "N/A"
+        }
+        return "screen ${name(1)} (permanent: ${if (resources.getValue(1).permanent == 1L) "iOS" else "Car"}), " +
+            "mainAudio ${name(2)} (permanent: ${if (resources.getValue(2).permanent == 1L) "iOS" else "Car"}), " +
+            "speech ${name(3)}, phone ${name(4)}, turns ${name(5)}"
+    }
     @Synchronized fun audio(phone: Boolean) {
         /*
          * Only `owner` moves. The real iPhone on this car keeps

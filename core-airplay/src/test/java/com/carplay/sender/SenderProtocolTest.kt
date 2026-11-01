@@ -36,8 +36,18 @@ class SenderProtocolTest {
         state.claimScreen(); assertTrue(state.ownsScreen())
         change(3); assertFalse(state.ownsScreen()); change(4); assertTrue(state.ownsScreen())
         change(1); change(3); change(4); assertFalse(state.ownsScreen()); change(2); assertTrue(state.ownsScreen())
-        assertThrows(IllegalArgumentException::class.java) { state.change(mapOf("type" to "changeModes", "params" to mapOf("resources" to listOf(mapOf("resourceID" to 1,"transferType" to 1),mapOf("resourceID" to 999,"transferType" to 1))))) }
+        /*
+         * An unknown resourceID is ignored, not thrown on (1.3.45).
+         *
+         * The real iPhone's table has five entries (screen, mainAudio, speech,
+         * phone, turns); this build now declares all five, and a sixth from a
+         * later firmware must not end the session over one unrecognised id.
+         */
         assertTrue(state.ownsScreen())
+        state.change(mapOf("type" to "changeModes", "params" to mapOf("resources" to
+            listOf(mapOf("resourceID" to 1, "transferType" to 1), mapOf("resourceID" to 999, "transferType" to 1)))))
+        // resourceID 1 was applied; the unknown 999 was skipped rather than thrown.
+        assertFalse(state.ownsScreen())
     }
     @Test fun resourceRestoreIdentifiesScreenAndAudioSeparately() {
         val state = SessionModes()
